@@ -67,6 +67,25 @@ static void qdr_activate_connections_CT(qdr_core_t *core)
     }
 }
 
+static inline bool try_execute(qdr_core_t *const core)
+{
+    uint8_t *msg_claim = NULL;
+    if (!try_fs_rb_claim_read(&core->action_list, &msg_claim)) {
+        //according to claim read semantic it means that the q is empty
+        return false;
+    }
+    uint64_t *content_offset = (uint64_t *) msg_claim;
+    qdr_action_t *action = (qdr_action_t *) *content_offset;
+    //from now we can commit the read claim
+    fs_rb_commit_read(&core->action_list);
+    if (action->label) {
+        qd_log(core->log, QD_LOG_TRACE, "Core action '%s'%s", action->label, core->running ? "" : " (discard)");
+    }
+    action->action_handler(core, action, !core->running);
+    //TODO action_list could be used like a qdr_action_t pool -> no need to free or alloc them anymore
+    free_qdr_action_t(action);
+    return true;
+}
 
 static void qdr_do_message_to_addr_free(qdr_core_t *core, qdr_general_work_t *work)
 {
@@ -123,46 +142,25 @@ void qdr_modules_finalize(qdr_core_t *core)
 void *router_core_thread(void *arg)
 {
     qdr_core_t        *core = (qdr_core_t*) arg;
-    qdr_action_list_t  action_list;
-    qdr_action_t      *action;
 
     qdr_forwarder_setup_CT(core);
     qdr_route_table_setup_CT(core);
     qdr_agent_setup_CT(core);
 
-    qdr_modules_init(core);
-
     qd_log(core->log, QD_LOG_INFO, "Router Core thread running. %s/%s", core->router_area, core->router_id);
+    qdr_modules_init(core);
+    atomic_store_explicit(&core->core_status.sleeping, false, memory_order_seq_cst);
+
     while (core->running) {
-        //
-        // Use the lock only to protect the condition variable and the action list
-        //
-        sys_mutex_lock(core->action_lock);
-
-        //
-        // Block on the condition variable when there is no action to do
-        //
-        while (core->running && DEQ_IS_EMPTY(core->action_list))
-            sys_cond_wait(core->action_cond, core->action_lock);
-
-        //
-        // Move the entire action list to a private list so we can process it without
-        // holding the lock
-        //
-        DEQ_MOVE(core->action_list, action_list);
-        sys_mutex_unlock(core->action_lock);
-
-        //
-        // Process and free all of the action items in the list
-        //
-        action = DEQ_HEAD(action_list);
-        while (action) {
-            DEQ_REMOVE_HEAD(action_list);
-            if (action->label)
-                qd_log(core->log, QD_LOG_TRACE, "Core action '%s'%s", action->label, core->running ? "" : " (discard)");
-            action->action_handler(core, action, !core->running);
-            free_qdr_action_t(action);
-            action = DEQ_HEAD(action_list);
+        //execute a batch of actions
+        int read_batch = 0;
+        while (try_execute(core)) {
+            read_batch++;
+        }
+        if (read_batch > 0) {
+            qd_log(core->log, QD_LOG_TRACE, "Core actions executed %d", read_batch);
+        } else {
+            qd_log(core->log, QD_LOG_TRACE, "No core actions available");
         }
 
         //
@@ -177,6 +175,23 @@ void *router_core_thread(void *arg)
             qdr_general_work_t *work = qdr_general_work(qdr_do_message_to_addr_free);
             DEQ_MOVE(core->delivery_cleanup_list, work->delivery_cleanup_list);
             qdr_post_general_work_CT(core, work);
+        }
+        //This cascade of isEmpty chceks must be preserved to save sleeping if possible
+        if (fs_rb_is_empty(&core->action_list)) {
+            //we need a full barrier to avoid fs_rb_is_empty() to move before this
+            atomic_store_explicit(&core->core_status.sleeping, true, memory_order_seq_cst);
+            if (fs_rb_is_empty(&core->action_list)) {
+                //save going to sleep if there is a signal in progress
+                if (!atomic_load_explicit(&core->core_status.wakeup.signaling, memory_order_acquire)) {
+                    sys_mutex_lock(core->core_status.wakeup.lock);
+                    //no need to wait if a racing producer has submitted something to do
+                    if (fs_rb_is_empty(&core->action_list)) {
+                        sys_cond_wait(core->core_status.wakeup.cond, core->core_status.wakeup.lock);
+                    }
+                    sys_mutex_unlock(core->core_status.wakeup.lock);
+                }
+            }
+            atomic_store_explicit(&core->core_status.sleeping, false, memory_order_release);
         }
     }
 

@@ -18,6 +18,7 @@
  */
 
 #include "router_core_private.h"
+#include <sys/user.h>
 #include "route_control.h"
 #include "exchange_bindings.h"
 #include "core_events.h"
@@ -61,10 +62,22 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     //
     // Set up the threading support
     //
-    core->action_cond = sys_cond();
-    core->action_lock = sys_mutex();
+    core->core_status.wakeup.cond = sys_cond();
+    core->core_status.wakeup.lock = sys_mutex();
+    atomic_store_explicit(&core->core_status.wakeup.signaling, false, memory_order_release);
     core->running     = true;
-    DEQ_INIT(core->action_list);
+    //init action_list
+    const index_t requested_capacity = 128 * 1024;
+    const uint32_t msg_size = sizeof(qdr_action_t *);
+    const index_t buffer_capacity = fs_rb_capacity(requested_capacity, msg_size);
+    qd_log(core->log, QD_LOG_TRACE, "Buffer capacity for action_list is %d bytes for %d elements of size %d",
+           buffer_capacity, requested_capacity, msg_size);
+    uint8_t * buffer = aligned_alloc(PAGE_SIZE, buffer_capacity);
+    //TODO it could inject the allocator fnct
+    new_fs_rb(&core->action_list, requested_capacity, msg_size);
+    qd_log(core->log, QD_LOG_TRACE, "action_list header has been initialized with aligned_message_size = %d",
+           core->action_list.aligned_message_size);
+    core->action_list.buffer = buffer;
 
     core->work_lock = sys_mutex();
     DEQ_INIT(core->work_list);
@@ -94,6 +107,28 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     return core;
 }
 
+static void wakeup_core(qdr_core_t *const core) {
+    bool done = false;
+    do {
+        if (atomic_load_explicit(&core->core_status.sleeping, memory_order_acquire)) {
+            bool was_signaling = false;
+            if (atomic_compare_exchange_weak_explicit(&core->core_status.wakeup.signaling, &was_signaling, true,
+                                                      memory_order_release, memory_order_relaxed)) {
+                //acquire is needed to avoid perform locking before having checked the value of sleeping
+                sys_mutex_lock(core->core_status.wakeup.lock);
+                sys_cond_signal(core->core_status.wakeup.cond);
+                sys_mutex_unlock(core->core_status.wakeup.lock);
+                //this could fail a concurrent compare_exchange: remember to check it
+                atomic_store_explicit(&core->core_status.wakeup.signaling, false, memory_order_release);
+                done = true;
+            } else {
+                done = was_signaling;
+            }
+        } else {
+            done = true;
+        }
+    } while (!done);
+}
 
 void qdr_core_free(qdr_core_t *core)
 {
@@ -101,7 +136,7 @@ void qdr_core_free(qdr_core_t *core)
     // Stop and join the thread
     //
     core->running = false;
-    sys_cond_signal(core->action_cond);
+    wakeup_core(core);
     sys_thread_join(core->thread);
 
     // Drain the general work lists
@@ -111,8 +146,6 @@ void qdr_core_free(qdr_core_t *core)
     // Free the core resources
     //
     sys_thread_free(core->thread);
-    sys_cond_free(core->action_cond);
-    sys_mutex_free(core->action_lock);
     sys_mutex_free(core->work_lock);
     sys_mutex_free(core->id_lock);
     qd_timer_free(core->work_timer);
@@ -209,6 +242,9 @@ void qdr_core_free(qdr_core_t *core)
     if (core->control_links_by_mask_bit) free(core->control_links_by_mask_bit);
     if (core->data_links_by_mask_bit)    free(core->data_links_by_mask_bit);
     if (core->neighbor_free_mask)        qd_bitmask_free(core->neighbor_free_mask);
+
+    //free the action_list buffer
+    free(core->action_list.buffer);
 
     free(core);
 }
@@ -319,15 +355,18 @@ qdr_action_t *qdr_action(qdr_action_handler_t action_handler, const char *label)
     return action;
 }
 
-
-void qdr_action_enqueue(qdr_core_t *core, qdr_action_t *action)
-{
-    sys_mutex_lock(core->action_lock);
-    DEQ_INSERT_TAIL(core->action_list, action);
-    sys_cond_signal(core->action_cond);
-    sys_mutex_unlock(core->action_lock);
+void qdr_action_enqueue(qdr_core_t *const core, qdr_action_t *const action) {
+    uint8_t *msg_claim = NULL;
+    while (!try_fs_rb_mp_claim(&core->action_list, &msg_claim)) {
+        //TODO instead of spinning would be great to return from qdr_action_enqueue propagating back-pressure
+    }
+    uint64_t *content_offset = (uint64_t *) msg_claim;
+    *content_offset = (uint64_t) action;
+    fs_rb_commit_claim(msg_claim);
+    //try_fs_rb_mp_claim() already perform a seq_cst operation on producer_sequence
+    //ie no need to use a full memory barrier here
+    wakeup_core(core);
 }
-
 
 qdr_address_t *qdr_address_CT(qdr_core_t *core, qd_address_treatment_t treatment, qdr_address_config_t *config)
 {
