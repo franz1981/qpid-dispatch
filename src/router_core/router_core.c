@@ -18,12 +18,14 @@
  */
 
 #include "router_core_private.h"
+#include <sys/user.h>
 #include "route_control.h"
 #include "exchange_bindings.h"
 #include "core_events.h"
 #include "delivery.h"
 #include <stdio.h>
 #include <strings.h>
+#include <queue/spmc_fs_rb.h>
 
 ALLOC_DEFINE(qdr_address_t);
 ALLOC_DEFINE(qdr_address_config_t);
@@ -33,7 +35,6 @@ ALLOC_DEFINE(qdr_link_t);
 ALLOC_DEFINE(qdr_router_ref_t);
 ALLOC_DEFINE(qdr_link_ref_t);
 ALLOC_DEFINE(qdr_delivery_cleanup_t);
-ALLOC_DEFINE(qdr_general_work_t);
 ALLOC_DEFINE(qdr_link_work_t);
 ALLOC_DEFINE(qdr_connection_ref_t);
 ALLOC_DEFINE(qdr_connection_info_t);
@@ -61,13 +62,35 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     //
     // Set up the threading support
     //
-    core->action_cond = sys_cond();
-    core->action_lock = sys_mutex();
+    core->core_status.wakeup.cond = sys_cond();
+    core->core_status.wakeup.lock = sys_mutex();
+    atomic_store_explicit(&core->core_status.wakeup.signaling, false, memory_order_release);
     core->running     = true;
-    DEQ_INIT(core->action_list);
+    //init action_list
+    const index_t requested_capacity = qd->action_list_capacity;
+    const uint32_t msg_size = sizeof(qdr_action_t);
+    const index_t buffer_capacity = fs_rb_capacity(requested_capacity, msg_size);
+    qd_log(core->log, QD_LOG_INFO, "Buffer capacity for action_list is %d bytes for %d elements of size %d bytes",
+           buffer_capacity, requested_capacity, msg_size);
+    uint8_t * buffer = aligned_alloc(PAGE_SIZE, buffer_capacity);
+    memset(buffer, 0, buffer_capacity);
+    new_fs_rb(&core->action_list, requested_capacity, msg_size);
+    qd_log(core->log, QD_LOG_TRACE, "action_list header has been initialized with aligned_message_size = %d",
+           core->action_list.aligned_message_size);
+    core->action_list.buffer = buffer;
 
-    core->work_lock = sys_mutex();
-    DEQ_INIT(core->work_list);
+    //allocate work list
+    const index_t work_list_buffer_capacity = fs_rb_capacity(requested_capacity, sizeof(qdr_general_work_t));
+    qd_log(core->log, QD_LOG_INFO, "Buffer capacity for work_list is %d bytes for %d elements of size %d bytes",
+           work_list_buffer_capacity, requested_capacity, sizeof(qdr_general_work_t));
+    new_spmc_fs_rb(&core->work_list, requested_capacity, sizeof(qdr_general_work_t));
+    qd_log(core->log, QD_LOG_TRACE, "work_list header has been initialized with aligned_message_size = %d",
+           core->work_list.aligned_message_size);
+    core->work_list.buffer = aligned_alloc(PAGE_SIZE, work_list_buffer_capacity);
+    memset(core->work_list.buffer, 0, work_list_buffer_capacity);
+    atomic_store_explicit(&core->workers.status.active_workers, 0, memory_order_seq_cst);
+
+
     core->work_timer = qd_timer(core->qd, qdr_general_handler, core);
 
     //
@@ -94,14 +117,36 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     return core;
 }
 
+static void wakeup_core(qdr_core_t *const core) {
+    bool done = false;
+    do {
+        if (atomic_load_explicit(&core->core_status.sleeping, memory_order_acquire)) {
+            bool was_signaling = false;
+            if (atomic_compare_exchange_weak_explicit(&core->core_status.wakeup.signaling, &was_signaling, true,
+                                                      memory_order_release, memory_order_relaxed)) {
+                //acquire is needed to avoid perform locking before having checked the value of sleeping
+                sys_mutex_lock(core->core_status.wakeup.lock);
+                sys_cond_signal(core->core_status.wakeup.cond);
+                sys_mutex_unlock(core->core_status.wakeup.lock);
+                //this could fail a concurrent compare_exchange: remember to check it
+                atomic_store_explicit(&core->core_status.wakeup.signaling, false, memory_order_release);
+                done = true;
+            } else {
+                done = was_signaling;
+            }
+        } else {
+            done = true;
+        }
+    } while (!done);
+}
 
 void qdr_core_free(qdr_core_t *core)
 {
     //
     // Stop and join the thread
     //
-    core->running = false;
-    sys_cond_signal(core->action_cond);
+    atomic_store_explicit(&core->running, false, memory_order_seq_cst);
+    wakeup_core(core);
     sys_thread_join(core->thread);
 
     // Drain the general work lists
@@ -111,9 +156,6 @@ void qdr_core_free(qdr_core_t *core)
     // Free the core resources
     //
     sys_thread_free(core->thread);
-    sys_cond_free(core->action_cond);
-    sys_mutex_free(core->action_lock);
-    sys_mutex_free(core->work_lock);
     sys_mutex_free(core->id_lock);
     qd_timer_free(core->work_timer);
 
@@ -209,6 +251,11 @@ void qdr_core_free(qdr_core_t *core)
     if (core->control_links_by_mask_bit) free(core->control_links_by_mask_bit);
     if (core->data_links_by_mask_bit)    free(core->data_links_by_mask_bit);
     if (core->neighbor_free_mask)        qd_bitmask_free(core->neighbor_free_mask);
+
+    //free the action_list buffer
+    free(core->action_list.buffer);
+    //fre the general work list
+    free(core->work_list.buffer);
 
     free(core);
 }
@@ -310,24 +357,59 @@ char *qdr_field_copy(qdr_field_t *field)
 }
 
 
-qdr_action_t *qdr_action(qdr_action_handler_t action_handler, const char *label)
+inline qdr_action_t qdr_action(qdr_action_handler_t action_handler, const char *label)
 {
-    qdr_action_t *action = new_qdr_action_t();
-    ZERO(action);
-    action->action_handler = action_handler;
-    action->label          = label;
+    qdr_action_t action;
+    ZERO(&action);
+    action.action_handler = action_handler;
+    action.label          = label;
     return action;
 }
 
-
-void qdr_action_enqueue(qdr_core_t *core, qdr_action_t *action)
-{
-    sys_mutex_lock(core->action_lock);
-    DEQ_INSERT_TAIL(core->action_list, action);
-    sys_cond_signal(core->action_cond);
-    sys_mutex_unlock(core->action_lock);
+void qdr_action_enqueue(qdr_core_t *const core, qdr_action_t *const action) {
+    uint8_t *msg_claim = NULL;
+    const int thread_count = core->qd->thread_count;
+    long failed_attempts = 0;
+    long is_full = 0;
+    long contended = 0;
+    if (thread_count == 1) {
+        while (!try_fs_rb_sp_claim(&core->action_list, &msg_claim)) {
+            failed_attempts++;
+            is_full++;
+        }
+    } else {
+        claim_result_t claim;
+        while ((claim = try_fs_rb_mp_fail_fast_claim(&core->action_list, &msg_claim)) != SUCCEED) {
+            failed_attempts++;
+            if (claim == CONTENTED) {
+                contended++;
+            } else if (claim == FULL) {
+                is_full++;
+            }
+        }
+    }
+    //TODO(franz): this threshold could be made configurable or just provide this metrics externally
+    memcpy(msg_claim, action, sizeof(qdr_action_t));
+    fs_rb_commit_claim(msg_claim);
+    if (thread_count == 1) {
+        //try_fs_rb_sp_claim() doesn't use any full memory barrier: needs to add it for wakeup_core();
+        atomic_thread_fence(memory_order_seq_cst);
+    }
+    //thread_count>1:
+    //try_fs_rb_mp_claim() already perform a seq_cst operation on producer_sequence
+    //ie no need to use a full memory barrier here
+    wakeup_core(core);
+    //report only at the end of the hot path ie while holding the ring_buffer claim
+    if (failed_attempts > 0) {
+        if (is_full > 0) {
+            qd_log(core->log, QD_LOG_INFO, "qdr_action_enqueue succeed after %d/%d full\t%d/%d contended failures",
+                   is_full, failed_attempts, contended, failed_attempts);
+        } else if (contended > core->qd->thread_count) {
+            qd_log(core->log, QD_LOG_INFO, "qdr_action_enqueue succeed after %d/%d full\t%d/%d contended failures",
+                   is_full, failed_attempts, contended, failed_attempts);
+        }
+    }
 }
-
 
 qdr_address_t *qdr_address_CT(qdr_core_t *core, qd_address_treatment_t treatment, qdr_address_config_t *config)
 {
@@ -685,45 +767,75 @@ void qdr_del_delivery_ref(qdr_delivery_ref_list_t *list, qdr_delivery_ref_t *ref
 
 static void qdr_general_handler(void *context)
 {
-    qdr_core_t              *core = (qdr_core_t*) context;
-    qdr_general_work_list_t  work_list;
-    qdr_general_work_t      *work;
-
-    sys_mutex_lock(core->work_lock);
-    DEQ_MOVE(core->work_list, work_list);
-    sys_mutex_unlock(core->work_lock);
-
-    work = DEQ_HEAD(work_list);
-    while (work) {
-        DEQ_REMOVE_HEAD(work_list);
-        work->handler(core, work);
-        free_qdr_general_work_t(work);
-        work = DEQ_HEAD(work_list);
-    }
+    qdr_core_t *core = (qdr_core_t *) context;
+    const int thread_count = core->qd->thread_count;
+    //execute more general work as possible
+    uint8_t *msg = NULL;
+    do {
+        atomic_fetch_add_explicit(&core->workers.status.active_workers, 1, memory_order_seq_cst);
+        while (true) {
+            if (thread_count == 1) {
+                if (!try_spmc_fs_rb_sc_claim_read(&core->work_list, &msg)) {
+                    //not work left to do
+                    break;
+                }
+            } else {
+                if (!try_spmc_fs_rb_mc_claim_read(&core->work_list, &msg)) {
+                    //not work left to do
+                    break;
+                }
+            }
+            qdr_general_work_t *work = (qdr_general_work_t *) msg;
+            work->handler(core, work);
+            spmc_fs_rb_commit_read(&core->work_list, msg);
+        }
+        //the last one to left could consider to cleanup any remaining work left
+        if (atomic_fetch_add_explicit(&core->workers.status.active_workers, -1, memory_order_seq_cst) == 1) {
+            if (!spmc_fs_rb_is_empty(&core->work_list)) {
+                continue;
+            } else {
+                break;
+            }
+        } else {
+            //one of many workers that continue his job
+            break;
+        }
+    } while (true);
 }
 
 
-qdr_general_work_t *qdr_general_work(qdr_general_work_handler_t handler)
+inline qdr_general_work_t qdr_general_work(qdr_general_work_handler_t handler)
 {
-    qdr_general_work_t *work = new_qdr_general_work_t();
-    ZERO(work);
-    work->handler = handler;
+    qdr_general_work_t work;
+    ZERO(&work);
+    work.handler = handler;
     return work;
 }
 
 
 void qdr_post_general_work_CT(qdr_core_t *core, qdr_general_work_t *work)
 {
-    bool notify;
-
-    sys_mutex_lock(core->work_lock);
-    DEQ_ITEM_INIT(work);
-    DEQ_INSERT_TAIL(core->work_list, work);
-    notify = DEQ_SIZE(core->work_list) == 1;
-    sys_mutex_unlock(core->work_lock);
-
-    if (notify)
+    //TODO improve the logic in order to avoid DEADLOCKS with action_list:
+    //- chooose to cleanup deliveries on this same thread ie core
+    //- make workers always able to handle the cleanup by making it cleaning
+    //  up deliveries if action_list is full
+    uint8_t *claimed_msg;
+    uint64_t claimed_pos;
+    uint64_t work_list_full = 0;
+    while (!try_spmc_fs_rb_claim(&core->work_list, &claimed_pos, &claimed_msg)) {
+        //BUUUUUURN :)
+        work_list_full++;
+        if ((work_list_full & 1023) == 0) {
+            qd_log(core->log, QD_LOG_INFO, "General work queue is full from a while...better to enlarge it");
+        }
+    }
+    memcpy(claimed_msg, work, sizeof(qdr_general_work_t));
+    spmc_fs_rb_commit_claim(&core->work_list, claimed_pos);
+    //need full barrier because the ring buffer is not using any HW barrier
+    atomic_thread_fence(memory_order_seq_cst);
+    if (atomic_load_explicit(&core->workers.status.active_workers, memory_order_acquire) <= 0) {
         qd_timer_schedule(core->work_timer, 0);
+    }
 }
 
 
@@ -779,18 +891,18 @@ static void qdr_global_stats_request_CT(qdr_core_t *core, qdr_action_t *action, 
         stats->deliveries_delayed_1sec = core->deliveries_delayed_1sec;
         stats->deliveries_delayed_1sec = core->deliveries_delayed_10sec;
     }
-    qdr_general_work_t *work = qdr_general_work(qdr_post_global_stats_response);
-    work->stats_handler = action->args.stats_request.handler;
-    work->context = action->args.stats_request.context;
-    qdr_post_general_work_CT(core, work);
+    qdr_general_work_t work = qdr_general_work(qdr_post_global_stats_response);
+    work.stats_handler = action->args.stats_request.handler;
+    work.context = action->args.stats_request.context;
+    qdr_post_general_work_CT(core, &work);
 }
 
 void qdr_request_global_stats(qdr_core_t *core, qdr_global_stats_t *stats, qdr_global_stats_handler_t callback, void *context)
 {
-    qdr_action_t *action = qdr_action(qdr_global_stats_request_CT, "global_stats_request");
-    action->args.stats_request.stats = stats;
-    action->args.stats_request.handler = callback;
-    action->args.stats_request.context = context;
-    qdr_action_enqueue(core, action);
+    qdr_action_t action = qdr_action(qdr_global_stats_request_CT, "global_stats_request");
+    action.args.stats_request.stats = stats;
+    action.args.stats_request.handler = callback;
+    action.args.stats_request.context = context;
+    qdr_action_enqueue(core, &action);
 }
 

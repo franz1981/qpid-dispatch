@@ -116,15 +116,15 @@ void qdr_manage_create(qdr_core_t              *core,
                        qd_buffer_list_t         body_buffers,
                        uint64_t                 in_conn_id)
 {
-    qdr_action_t *action = qdr_action(qdr_manage_create_CT, "manage_create");
+    qdr_action_t action = qdr_action(qdr_manage_create_CT, "manage_create");
 
     // Create a query object here
-    action->args.agent.query        = qdr_query(core, context, type, out_body, in_conn_id);
-    action->args.agent.name         = qdr_field_from_iter(name);
-    action->args.agent.in_body      = in_body;
-    action->args.agent.body_buffers = body_buffers;
+    action.args.agent.query        = qdr_query(core, context, type, out_body, in_conn_id);
+    action.args.agent.name         = qdr_field_from_iter(name);
+    action.args.agent.in_body      = in_body;
+    action.args.agent.body_buffers = body_buffers;
 
-    qdr_action_enqueue(core, action);
+    qdr_action_enqueue(core, &action);
 }
 
 
@@ -135,14 +135,14 @@ void qdr_manage_delete(qdr_core_t *core,
                        qd_iterator_t           *identity,
                        uint64_t                 in_conn_id)
 {
-    qdr_action_t *action = qdr_action(qdr_manage_delete_CT, "manage_delete");
+    qdr_action_t action = qdr_action(qdr_manage_delete_CT, "manage_delete");
 
     // Create a query object here
-    action->args.agent.query = qdr_query(core, context, type, 0, in_conn_id);
-    action->args.agent.name = qdr_field_from_iter(name);
-    action->args.agent.identity = qdr_field_from_iter(identity);
+    action.args.agent.query = qdr_query(core, context, type, 0, in_conn_id);
+    action.args.agent.name = qdr_field_from_iter(name);
+    action.args.agent.identity = qdr_field_from_iter(identity);
 
-    qdr_action_enqueue(core, action);
+    qdr_action_enqueue(core, &action);
 }
 
 
@@ -154,14 +154,14 @@ void qdr_manage_read(qdr_core_t              *core,
                      qd_composed_field_t     *body,
                      uint64_t                 in_conn_id)
 {
-    qdr_action_t *action = qdr_action(qdr_manage_read_CT, "manage_read");
+    qdr_action_t action = qdr_action(qdr_manage_read_CT, "manage_read");
 
     // Create a query object here
-    action->args.agent.query = qdr_query(core, context, entity_type, body, in_conn_id);
-    action->args.agent.identity  = qdr_field_from_iter(identity);
-    action->args.agent.name = qdr_field_from_iter(name);
+    action.args.agent.query = qdr_query(core, context, entity_type, body, in_conn_id);
+    action.args.agent.identity  = qdr_field_from_iter(identity);
+    action.args.agent.name = qdr_field_from_iter(name);
 
-    qdr_action_enqueue(core, action);
+    qdr_action_enqueue(core, &action);
 }
 
 
@@ -174,13 +174,13 @@ void qdr_manage_update(qdr_core_t              *core,
                        qd_composed_field_t     *out_body,
                        uint64_t                 in_conn_id)
 {
-    qdr_action_t *action = qdr_action(qdr_manage_update_CT, "manage_update");
-    action->args.agent.query = qdr_query(core, context, type, out_body, in_conn_id);
-    action->args.agent.name = qdr_field_from_iter(name);
-    action->args.agent.identity = qdr_field_from_iter(identity);
-    action->args.agent.in_body = in_body;
+    qdr_action_t action = qdr_action(qdr_manage_update_CT, "manage_update");
+    action.args.agent.query = qdr_query(core, context, type, out_body, in_conn_id);
+    action.args.agent.name = qdr_field_from_iter(name);
+    action.args.agent.identity = qdr_field_from_iter(identity);
+    action.args.agent.in_body = in_body;
 
-    qdr_action_enqueue(core, action);
+    qdr_action_enqueue(core, &action);
 }
 
 
@@ -232,18 +232,18 @@ void qdr_query_add_attribute_names(qdr_query_t *query)
 
 void qdr_query_get_first(qdr_query_t *query, int offset)
 {
-    qdr_action_t *action = qdr_action(qdrh_query_get_first_CT, "query_get_first");
-    action->args.agent.query  = query;
-    action->args.agent.offset = offset;
-    qdr_action_enqueue(query->core, action);
+    qdr_action_t action = qdr_action(qdrh_query_get_first_CT, "query_get_first");
+    action.args.agent.query  = query;
+    action.args.agent.offset = offset;
+    qdr_action_enqueue(query->core, &action);
 }
 
 
 void qdr_query_get_next(qdr_query_t *query)
 {
-    qdr_action_t *action = qdr_action(qdrh_query_get_next_CT, "query_get_next");
-    action->args.agent.query = query;
-    qdr_action_enqueue(query->core, action);
+    qdr_action_t action = qdr_action(qdrh_query_get_next_CT, "query_get_next");
+    action.args.agent.query = query;
+    qdr_action_enqueue(query->core, &action);
 }
 
 
