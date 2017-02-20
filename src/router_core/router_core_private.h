@@ -25,6 +25,8 @@
 #include <qpid/dispatch/threading.h>
 #include <qpid/dispatch/atomic.h>
 #include <qpid/dispatch/log.h>
+#include "../queue/fs_rb.h"
+#include "../queue/spmc_fs_rb.h"
 #include <memory.h>
 
 typedef struct qdr_address_t         qdr_address_t;
@@ -103,7 +105,6 @@ typedef struct qdr_action_t qdr_action_t;
 typedef void (*qdr_action_handler_t) (qdr_core_t *core, qdr_action_t *action, bool discard);
 
 struct qdr_action_t {
-    DEQ_LINKS(qdr_action_t);
     qdr_action_handler_t  action_handler;
     const char           *label;
     union {
@@ -200,9 +201,9 @@ struct qdr_action_t {
     } args;
 };
 
-ALLOC_DECLARE(qdr_action_t);
-DEQ_DECLARE(qdr_action_t, qdr_action_list_t);
+typedef struct fs_rb_t qdr_action_list_t;
 
+typedef struct spmc_fs_rb_t qdr_general_work_list_t;
 //
 //
 //
@@ -229,7 +230,6 @@ typedef struct qdr_general_work_t qdr_general_work_t;
 typedef void (*qdr_general_work_handler_t) (qdr_core_t *core, qdr_general_work_t *work);
 
 struct qdr_general_work_t {
-    DEQ_LINKS(qdr_general_work_t);
     qdr_general_work_handler_t   handler;
     qdr_field_t                 *field;
     int                          maskbit;
@@ -244,10 +244,7 @@ struct qdr_general_work_t {
     void                       *context;
 };
 
-ALLOC_DECLARE(qdr_general_work_t);
-DEQ_DECLARE(qdr_general_work_t, qdr_general_work_list_t);
-
-qdr_general_work_t *qdr_general_work(qdr_general_work_handler_t handler);
+qdr_general_work_t qdr_general_work(qdr_general_work_handler_t handler);
 
 
 //
@@ -753,13 +750,28 @@ struct qdr_core_t {
     qd_log_source_t   *log;
     qd_log_source_t   *agent_log;
     sys_thread_t      *thread;
-    bool               running;
+    _Atomic bool       running;
     qdr_action_list_t  action_list;
-    sys_cond_t        *action_cond;
-    sys_mutex_t       *action_lock;
+    struct {
+        int8_t padding[(2 * CACHE_LINE_LENGTH)];
+        _Atomic bool sleeping;
+        struct {
+            int8_t padding[(2 * CACHE_LINE_LENGTH)];
+            _Atomic bool signaling;
+            sys_cond_t *cond;
+            sys_mutex_t *lock;
+        } wakeup;
+    } core_status;
 
-    sys_mutex_t             *work_lock;
+
     qdr_core_timer_list_t    scheduled_timers;
+    struct {
+        int8_t padding[(2 * CACHE_LINE_LENGTH)];
+        struct {
+            _Atomic uint64_t active_workers;
+            int8_t padding[(2 * CACHE_LINE_LENGTH)];
+        } status;
+    } workers;
     qdr_general_work_list_t  work_list;
     qd_timer_t              *work_timer;
     uint32_t                 uptime_ticks;
@@ -890,7 +902,10 @@ void qdr_management_agent_on_message(void *context, qd_message_t *msg, int link_
 void  qdr_route_table_setup_CT(qdr_core_t *core);
 void  qdr_agent_setup_CT(qdr_core_t *core);
 void  qdr_forwarder_setup_CT(qdr_core_t *core);
-qdr_action_t *qdr_action(qdr_action_handler_t action_handler, const char *label);
+qdr_action_t qdr_action(qdr_action_handler_t action_handler, const char *label);
+/**
+ * The {@code *action} content is being copied into the action_list.
+ */
 void qdr_action_enqueue(qdr_core_t *core, qdr_action_t *action);
 void qdr_link_issue_credit_CT(qdr_core_t *core, qdr_link_t *link, int credit, bool drain);
 void qdr_drain_inbound_undelivered_CT(qdr_core_t *core, qdr_link_t *link, qdr_address_t *addr);

@@ -51,6 +51,8 @@ struct qd_dispatch_t {
     qd_address_treatment_t   default_treatment;
 
     int    thread_count;
+    int    action_list_capacity;
+    int    max_batch_size;
     char  *sasl_config_path;
     char  *sasl_config_name;
     char  *router_area;
