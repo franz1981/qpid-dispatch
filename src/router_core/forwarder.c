@@ -267,14 +267,14 @@ void qdr_forward_on_message(qdr_core_t *core, qdr_general_work_t *work)
 
 void qdr_forward_on_message_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_link_t *link, qd_message_t *msg)
 {
-    qdr_general_work_t *work = qdr_general_work(qdr_forward_on_message);
-    work->on_message         = sub->on_message;
-    work->on_message_context = sub->on_message_context;
-    work->msg                = qd_message_copy(msg);
-    work->maskbit            = link ? link->conn->mask_bit : 0;
-    work->inter_router_cost  = link ? link->conn->inter_router_cost : 1;
-    work->in_conn_id         = link ? link->conn->identity : 0;
-    qdr_post_general_work_CT(core, work);
+    qdr_general_work_t work = qdr_general_work(qdr_forward_on_message);
+    work.on_message         = sub->on_message;
+    work.on_message_context = sub->on_message_context;
+    work.msg                = qd_message_copy(msg);
+    work.maskbit            = link ? link->conn->mask_bit : 0;
+    work.inter_router_cost  = link ? link->conn->inter_router_cost : 1;
+    work.in_conn_id         = link ? link->conn->identity : 0;
+    qdr_post_general_work_CT(core, &work);
 }
 
 

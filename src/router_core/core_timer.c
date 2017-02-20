@@ -28,8 +28,8 @@ void qdr_process_tick_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 
 void qdr_process_tick(qdr_core_t *core)
 {
-    qdr_action_t *action = qdr_action(qdr_process_tick_CT, "process_tick");
-    qdr_action_enqueue(core, action);
+    qdr_action_t action = qdr_action(qdr_process_tick_CT, "process_tick");
+    qdr_action_enqueue(core, &action);
 }
 
 
