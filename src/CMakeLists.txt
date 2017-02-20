@@ -105,6 +105,8 @@ set(qpid_dispatch_SOURCES
   server.c
   timer.c
   trace_mask.c
+  queue/fs_rb.c
+  queue/spmc_fs_rb.c
   python_utils.c
   )
 
