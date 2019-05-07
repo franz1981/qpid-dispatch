@@ -67,13 +67,13 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     atomic_store_explicit(&core->core_status.wakeup.signaling, false, memory_order_release);
     core->running     = true;
     //init action_list
-    const index_t requested_capacity = 128 * 1024;
-    const uint32_t msg_size = sizeof(qdr_action_t *);
+    //TODO add a configuration parameter for this
+    const index_t requested_capacity = 16 * 1024;
+    const uint32_t msg_size = sizeof(qdr_action_t);
     const index_t buffer_capacity = fs_rb_capacity(requested_capacity, msg_size);
     qd_log(core->log, QD_LOG_TRACE, "Buffer capacity for action_list is %d bytes for %d elements of size %d",
            buffer_capacity, requested_capacity, msg_size);
     uint8_t * buffer = aligned_alloc(PAGE_SIZE, buffer_capacity);
-    //TODO it could inject the allocator fnct
     new_fs_rb(&core->action_list, requested_capacity, msg_size);
     qd_log(core->log, QD_LOG_TRACE, "action_list header has been initialized with aligned_message_size = %d",
            core->action_list.aligned_message_size);
@@ -135,7 +135,7 @@ void qdr_core_free(qdr_core_t *core)
     //
     // Stop and join the thread
     //
-    core->running = false;
+    atomic_store_explicit(&core->running, false, memory_order_seq_cst);
     wakeup_core(core);
     sys_thread_join(core->thread);
 
@@ -346,23 +346,34 @@ char *qdr_field_copy(qdr_field_t *field)
 }
 
 
-qdr_action_t *qdr_action(qdr_action_handler_t action_handler, const char *label)
+inline qdr_action_t qdr_action(qdr_action_handler_t action_handler, const char *label)
 {
-    qdr_action_t *action = new_qdr_action_t();
-    ZERO(action);
-    action->action_handler = action_handler;
-    action->label          = label;
+    qdr_action_t action;
+    ZERO(&action);
+    action.action_handler = action_handler;
+    action.label          = label;
     return action;
 }
 
 void qdr_action_enqueue(qdr_core_t *const core, qdr_action_t *const action) {
     uint8_t *msg_claim = NULL;
-    while (!try_fs_rb_mp_claim(&core->action_list, &msg_claim)) {
-        //TODO instead of spinning would be great to return from qdr_action_enqueue propagating back-pressure
+    const int thread_count = core->qd->thread_count;
+    if (thread_count == 1) {
+        while (!try_fs_rb_sp_claim(&core->action_list, &msg_claim)) {
+            //TODO instead of spinning would be great to return from qdr_action_enqueue, propagating back-pressure
+        }
+    } else {
+        while (!try_fs_rb_mp_claim(&core->action_list, &msg_claim)) {
+            //TODO instead of spinning would be great to return from qdr_action_enqueue, propagating back-pressure
+        }
     }
-    uint64_t *content_offset = (uint64_t *) msg_claim;
-    *content_offset = (uint64_t) action;
+    memcpy(msg_claim, action, sizeof(qdr_action_t));
     fs_rb_commit_claim(msg_claim);
+    if (thread_count == 1) {
+        //try_fs_rb_sp_claim() doesn't use any full memory barrier: needs to add it for wakeup_core();
+        atomic_thread_fence(memory_order_seq_cst);
+    }
+    //thread_count>1:
     //try_fs_rb_mp_claim() already perform a seq_cst operation on producer_sequence
     //ie no need to use a full memory barrier here
     wakeup_core(core);
@@ -826,10 +837,10 @@ static void qdr_global_stats_request_CT(qdr_core_t *core, qdr_action_t *action, 
 
 void qdr_request_global_stats(qdr_core_t *core, qdr_global_stats_t *stats, qdr_global_stats_handler_t callback, void *context)
 {
-    qdr_action_t *action = qdr_action(qdr_global_stats_request_CT, "global_stats_request");
-    action->args.stats_request.stats = stats;
-    action->args.stats_request.handler = callback;
-    action->args.stats_request.context = context;
-    qdr_action_enqueue(core, action);
+    qdr_action_t action = qdr_action(qdr_global_stats_request_CT, "global_stats_request");
+    action.args.stats_request.stats = stats;
+    action.args.stats_request.handler = callback;
+    action.args.stats_request.context = context;
+    qdr_action_enqueue(core, &action);
 }
 

@@ -134,10 +134,10 @@ void qdr_delivery_decref(qdr_core_t *core, qdr_delivery_t *delivery, const char 
         // The delivery deletion must occur inside the core thread.
         // Queue up an action to do the work.
         //
-        qdr_action_t *action = qdr_action(qdr_delete_delivery_CT, "delete_delivery");
-        action->args.delivery.delivery = delivery;
-        action->label = label;
-        qdr_action_enqueue(core, action);
+        qdr_action_t action = qdr_action(qdr_delete_delivery_CT, "delete_delivery");
+        action.args.delivery.delivery = delivery;
+        action.label = label;
+        qdr_action_enqueue(core, &action);
     }
 }
 
@@ -172,11 +172,11 @@ bool qdr_delivery_presettled(const qdr_delivery_t *delivery)
 void qdr_delivery_update_disposition(qdr_core_t *core, qdr_delivery_t *delivery, uint64_t disposition,
                                      bool settled, qdr_error_t *error, pn_data_t *ext_state, bool ref_given)
 {
-    qdr_action_t *action = qdr_action(qdr_update_delivery_CT, "update_delivery");
-    action->args.delivery.delivery    = delivery;
-    action->args.delivery.disposition = disposition;
-    action->args.delivery.settled     = settled;
-    action->args.delivery.error       = error;
+    qdr_action_t action = qdr_action(qdr_update_delivery_CT, "update_delivery");
+    action.args.delivery.delivery    = delivery;
+    action.args.delivery.disposition = disposition;
+    action.args.delivery.settled     = settled;
+    action.args.delivery.error       = error;
 
     // handle delivery-state extensions e.g. declared, transactional-state
     qdr_delivery_read_extension_state(delivery, disposition, ext_state, false);
@@ -189,21 +189,21 @@ void qdr_delivery_update_disposition(qdr_core_t *core, qdr_delivery_t *delivery,
     if (!ref_given)
         qdr_delivery_incref(delivery, "qdr_delivery_update_disposition - add to action list");
 
-    qdr_action_enqueue(core, action);
+    qdr_action_enqueue(core, &action);
 }
 
 
 qdr_delivery_t *qdr_deliver_continue(qdr_core_t *core,qdr_delivery_t *in_dlv)
 {
-    qdr_action_t   *action = qdr_action(qdr_deliver_continue_CT, "deliver_continue");
-    action->args.connection.delivery = in_dlv;
+    qdr_action_t   action = qdr_action(qdr_deliver_continue_CT, "deliver_continue");
+    action.args.connection.delivery = in_dlv;
 
     qd_message_t *msg = qdr_delivery_message(in_dlv);
-    action->args.connection.more = !qd_message_receive_complete(msg);
+    action.args.connection.more = !qd_message_receive_complete(msg);
 
     // This incref is for the action reference
     qdr_delivery_incref(in_dlv, "qdr_deliver_continue - add to action list");
-    qdr_action_enqueue(core, action);
+    qdr_action_enqueue(core, &action);
     return in_dlv;
 }
 

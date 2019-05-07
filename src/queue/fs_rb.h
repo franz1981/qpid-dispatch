@@ -20,6 +20,7 @@ struct fs_rb_t {
         _Atomic uint64_t consumer_position;
         int8_t padding[(2 * CACHE_LINE_LENGTH)];
     } consumer;
+    uint32_t look_ahead_step;
     index_t mask;
     index_t capacity;
     uint32_t aligned_message_size;
@@ -39,7 +40,6 @@ bool new_fs_rb(
 
 bool try_fs_rb_sp_claim(
         const struct fs_rb_t *const header,
-        const uint32_t max_look_ahead_step,
         uint8_t **const claimed_message);
 
 bool try_fs_rb_mp_claim(
@@ -56,9 +56,11 @@ uint32_t fs_rb_read(
         const uint32_t count, void *const context);
 
 bool try_fs_rb_claim_read(const struct fs_rb_t *const header,
-                                        uint8_t **const read_message_address);
+                          uint64_t *claimed_position,
+                          uint8_t **const read_message_address);
 
-void fs_rb_commit_read(const struct fs_rb_t *const header);
+void fs_rb_commit_read(const struct fs_rb_t *const header, const uint64_t claimed_position,
+                       uint8_t *const read_message_address);
 
 bool fs_rb_is_empty(const struct fs_rb_t *const header);
 

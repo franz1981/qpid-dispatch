@@ -67,23 +67,20 @@ static void qdr_activate_connections_CT(qdr_core_t *core)
     }
 }
 
-static inline bool try_execute(qdr_core_t *const core)
-{
+static inline bool try_execute(qdr_core_t *const core, bool is_running) {
     uint8_t *msg_claim = NULL;
-    if (!try_fs_rb_claim_read(&core->action_list, &msg_claim)) {
+    uint64_t claimed_position;
+    if (!try_fs_rb_claim_read(&core->action_list, &claimed_position, &msg_claim)) {
         //according to claim read semantic it means that the q is empty
         return false;
     }
-    uint64_t *content_offset = (uint64_t *) msg_claim;
-    qdr_action_t *action = (qdr_action_t *) *content_offset;
-    //from now we can commit the read claim
-    fs_rb_commit_read(&core->action_list);
+    qdr_action_t *action = (qdr_action_t *) msg_claim;
     if (action->label) {
-        qd_log(core->log, QD_LOG_TRACE, "Core action '%s'%s", action->label, core->running ? "" : " (discard)");
+        qd_log(core->log, QD_LOG_TRACE, "Core action '%s'%s", action->label, is_running ? "" : " (discard)");
     }
-    action->action_handler(core, action, !core->running);
-    //TODO action_list could be used like a qdr_action_t pool -> no need to free or alloc them anymore
-    free_qdr_action_t(action);
+    action->action_handler(core, action, !is_running);
+    //from now we can commit the read claim
+    fs_rb_commit_read(&core->action_list, claimed_position, msg_claim);
     return true;
 }
 
@@ -150,11 +147,12 @@ void *router_core_thread(void *arg)
     qd_log(core->log, QD_LOG_INFO, "Router Core thread running. %s/%s", core->router_area, core->router_id);
     qdr_modules_init(core);
     atomic_store_explicit(&core->core_status.sleeping, false, memory_order_seq_cst);
-
-    while (core->running) {
+    bool is_running;
+    while ((is_running = atomic_load_explicit(&core->running, memory_order_acquire)) ||
+           !fs_rb_is_empty(&core->action_list)) {
         //execute a batch of actions
         int read_batch = 0;
-        while (try_execute(core)) {
+        while (try_execute(core, is_running)) {
             read_batch++;
         }
         if (read_batch > 0) {
@@ -194,7 +192,12 @@ void *router_core_thread(void *arg)
             atomic_store_explicit(&core->core_status.sleeping, false, memory_order_release);
         }
     }
-
-    qd_log(core->log, QD_LOG_INFO, "Router Core thread exited");
+    const uint32_t remaining_actions = fs_rb_size(&core->action_list);
+    if (remaining_actions > 0) {
+        qd_log(core->log, QD_LOG_INFO, "Router Core thread exited leaving %d actions yet to be processed",
+               remaining_actions);
+    } else {
+        qd_log(core->log, QD_LOG_INFO, "Router Core thread exited");
+    }
     return 0;
 }

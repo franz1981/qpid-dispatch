@@ -30,6 +30,7 @@ uint64_t fs_rb_load_producer_position(const struct fs_rb_t *const header) {
 bool new_fs_rb(struct fs_rb_t *const header,
                const index_t requested_capacity,
                const uint32_t message_size) {
+    const uint32_t MAX_LOOK_AHEAD_STEP = 4096;
     const index_t next_pow_2_requested_capacity = next_pow_2(requested_capacity);
     const index_t aligned_message_size = align(message_size + MESSAGE_STATE_SIZE, MESSAGE_STATE_SIZE);
     header->capacity = next_pow_2_requested_capacity;
@@ -38,15 +39,17 @@ bool new_fs_rb(struct fs_rb_t *const header,
     header->producer.producer_position = 0;
     header->producer.consumer_cache_position = 0;
     header->consumer.consumer_position = 0;
+    const uint32_t look_ahead_step = next_pow_2_requested_capacity / 4;
+    header->look_ahead_step = look_ahead_step > MAX_LOOK_AHEAD_STEP ? MAX_LOOK_AHEAD_STEP : look_ahead_step;
     return true;
 }
 
 static bool sp_claim_slow_path(uint8_t *const buffer, const index_t message_state_offset,
                                const _Atomic uint64_t *consumer_cache_position_address,
-                               const uint64_t consumer_cache_position, const uint32_t max_look_ahead_step,
+                               const uint64_t consumer_cache_position, const uint32_t look_ahead_step,
                                const index_t mask, const index_t aligned_message_size) {
     //try to look ahead if the consumer has freed MAX_LOOK_AHEAD_STEP messages
-    const uint64_t next_consumer_cache_position = consumer_cache_position + max_look_ahead_step;
+    const uint64_t next_consumer_cache_position = consumer_cache_position + look_ahead_step;
     //check the state of the message
     const index_t look_ahead_message_offset = (next_consumer_cache_position & mask) * aligned_message_size;
     const _Atomic uint32_t *const look_ahead_message_state_atomic_address = (_Atomic uint32_t *) (buffer +
@@ -73,8 +76,8 @@ static bool sp_claim_slow_path(uint8_t *const buffer, const index_t message_stat
 }
 
 bool try_fs_rb_sp_claim(const struct fs_rb_t *const header,
-                        const uint32_t max_look_ahead_step,
                         uint8_t **const claimed_message) {
+    const uint32_t look_ahead_step = header->look_ahead_step;
     uint8_t *const buffer = header->buffer;
     const index_t mask = header->mask;
     const index_t aligned_message_size = header->aligned_message_size;
@@ -86,7 +89,7 @@ bool try_fs_rb_sp_claim(const struct fs_rb_t *const header,
     if (producer_position >= consumer_cache_position &&
         !sp_claim_slow_path(buffer, message_state_offset, &header->producer.consumer_cache_position,
                             consumer_cache_position,
-                            max_look_ahead_step, mask, aligned_message_size)) {
+                            look_ahead_step, mask, aligned_message_size)) {
         return false;
     }
     atomic_store_explicit(&header->producer.producer_position, producer_position + 1, memory_order_relaxed);
@@ -144,6 +147,7 @@ void fs_rb_commit_claim(const uint8_t *const claimed_message_address) {
 
 
 bool try_fs_rb_claim_read(const struct fs_rb_t *const header,
+                          uint64_t *claimed_position,
                           uint8_t **const read_message_address) {
     uint8_t *const buffer = header->buffer;
     const index_t mask = header->mask;
@@ -169,19 +173,20 @@ bool try_fs_rb_claim_read(const struct fs_rb_t *const header,
         }
     }
     *read_message_address = message_state_address + MESSAGE_STATE_SIZE;
-    //can already update the message_state here because the consumer slot won't be available
-    //until the consumer_position will move forward
-    atomic_store_explicit(message_state_atomic_address, MESSAGE_STATE_FREE, memory_order_relaxed);
+    *claimed_position = consumer_position;
     return true;
 }
 
 
-void fs_rb_commit_read(const struct fs_rb_t *const header) {
-    const uint64_t consumer_position = atomic_load_explicit(&header->consumer.consumer_position, memory_order_relaxed);
-    //it releases previous writes:
-    //- message state
-    //- message content
-    atomic_store_explicit(&header->consumer.consumer_position, consumer_position + 1, memory_order_release);
+void fs_rb_commit_read(const struct fs_rb_t *const header, const uint64_t claimed_position,
+                       uint8_t *const read_message_address) {
+    const _Atomic uint32_t *const message_state_address = (_Atomic uint32_t *) (read_message_address -
+                                                                                MESSAGE_STATE_SIZE);
+    //this first release is necessary in the single producer case to be sure that any operation on the message content performed in consumer
+    //will be visible to it when it will acquire the message state indicator
+    atomic_store_explicit(message_state_address, MESSAGE_STATE_FREE, memory_order_release);
+    //the second release is necessary to be sure that in the multi producer case, the last store of the indicator will happen before the consume read
+    atomic_store_explicit(&header->consumer.consumer_position, claimed_position + 1, memory_order_release);
 }
 
 uint32_t fs_rb_read(
@@ -205,7 +210,7 @@ uint32_t fs_rb_read(
             atomic_thread_fence(memory_order_acquire);
             uint8_t *message_content_address = message_state_address + MESSAGE_STATE_SIZE;
             const bool stop = !consumer(message_content_address, context);
-            //this first release is necessary in the single producer case to be sure that ay operation on the message content performed in consumer
+            //this first release is necessary in the single producer case to be sure that any operation on the message content performed in consumer
             //will be visible to it when it will acquire the message state indicator
             atomic_store_explicit(message_state_atomic_address, MESSAGE_STATE_FREE, memory_order_release);
             //the second release is necessary to be sure that in the multi producer case, the last store of the indicator will happen before the consume read

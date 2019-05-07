@@ -113,10 +113,10 @@ static void source_send(test_endpoint_t *ep, bool presettled)
     qdrc_endpoint_send_CT(ep->node->core, ep->ep, dlv, presettled);
 
     if (--ep->credit > 0) {
-        qdr_action_t *action = qdr_action(endpoint_action, "test_hooks_endpoint_action");
-        action->args.general.context_1 = (void*) ep;
+        qdr_action_t action = qdr_action(endpoint_action, "test_hooks_endpoint_action");
+        action.args.general.context_1 = (void*) ep;
         ep->in_action_list = true;
-        qdr_action_enqueue(ep->node->core, action);
+        qdr_action_enqueue(ep->node->core, &action);
     }
 }
 

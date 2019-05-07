@@ -104,7 +104,6 @@ typedef struct qdr_action_t qdr_action_t;
 typedef void (*qdr_action_handler_t) (qdr_core_t *core, qdr_action_t *action, bool discard);
 
 struct qdr_action_t {
-    DEQ_LINKS(qdr_action_t);
     qdr_action_handler_t  action_handler;
     const char           *label;
     union {
@@ -742,7 +741,7 @@ struct qdr_core_t {
     qd_log_source_t   *log;
     qd_log_source_t   *agent_log;
     sys_thread_t      *thread;
-    bool               running;
+    _Atomic bool       running;
     qdr_action_list_t  action_list;
     struct {
         int8_t padding[(2 * CACHE_LINE_LENGTH)];
@@ -884,7 +883,10 @@ void qdr_management_agent_on_message(void *context, qd_message_t *msg, int link_
 void  qdr_route_table_setup_CT(qdr_core_t *core);
 void  qdr_agent_setup_CT(qdr_core_t *core);
 void  qdr_forwarder_setup_CT(qdr_core_t *core);
-qdr_action_t *qdr_action(qdr_action_handler_t action_handler, const char *label);
+qdr_action_t qdr_action(qdr_action_handler_t action_handler, const char *label);
+/**
+ * The {@code *action} content is being copied into the action_list.
+ */
 void qdr_action_enqueue(qdr_core_t *core, qdr_action_t *action);
 void qdr_link_issue_credit_CT(qdr_core_t *core, qdr_link_t *link, int credit, bool drain);
 void qdr_drain_inbound_undelivered_CT(qdr_core_t *core, qdr_link_t *link, qdr_address_t *addr);
