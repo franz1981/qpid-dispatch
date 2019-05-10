@@ -144,7 +144,7 @@ void *router_core_thread(void *arg)
     qdr_route_table_setup_CT(core);
     qdr_agent_setup_CT(core);
     //TODO this heuristic is assuming fairness between workers
-    const int max_batch_size = core->qd->thread_count;
+    const int max_batch_size = core->qd->max_batch_size;
     qd_log(core->log, QD_LOG_INFO, "Router Core thread running. %s/%s", core->router_area, core->router_id);
     qd_log(core->log, QD_LOG_INFO, "Using max_batch_size = %d", max_batch_size);
     qdr_modules_init(core);
