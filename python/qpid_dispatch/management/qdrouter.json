@@ -443,6 +443,11 @@
                     "description": "The number of threads that will be created to process message traffic and other application work (timers, non-amqp file descriptors, etc.) .",
                     "create": true
                 },
+                "actionListCapacity": {
+                    "type": "integer",
+                    "description": "The capacity of the shared ring buffer holding the actions submitted by worker threads to core thread",
+                    "create": true
+                },
                 "debugDumpFile": {
                     "type": "path",
                     "description": "The absolute path to the location for the debug dump file. The router writes debug-level information to this file if the logger is not available.",

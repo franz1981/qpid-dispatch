@@ -46,6 +46,14 @@ bool try_fs_rb_mp_claim(
         const struct fs_rb_t *const header,
         uint8_t **const claimed_message);
 
+typedef enum claim_result {
+    SUCCEED = 0, FULL = 1, CONTENTED = 2
+} claim_result_t;
+
+claim_result_t try_fs_rb_mp_fail_fast_claim(
+        const struct fs_rb_t *const header,
+        uint8_t **const claimed_message);
+
 void fs_rb_commit_claim(const uint8_t *const claimed_message_address);
 
 typedef bool(*const fs_rb_message_consumer)(uint8_t *const, void *const);

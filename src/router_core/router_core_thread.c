@@ -143,24 +143,25 @@ void *router_core_thread(void *arg)
     qdr_forwarder_setup_CT(core);
     qdr_route_table_setup_CT(core);
     qdr_agent_setup_CT(core);
-
+    //TODO this heuristic is assuming fairness between workers
+    const int max_batch_size = core->qd->thread_count;
     qd_log(core->log, QD_LOG_INFO, "Router Core thread running. %s/%s", core->router_area, core->router_id);
+    qd_log(core->log, QD_LOG_INFO, "Using max_batch_size = %d", max_batch_size);
     qdr_modules_init(core);
     atomic_store_explicit(&core->core_status.sleeping, false, memory_order_seq_cst);
     bool is_running;
     while ((is_running = atomic_load_explicit(&core->running, memory_order_acquire)) ||
            !fs_rb_is_empty(&core->action_list)) {
-        //execute a batch of actions
+
         int read_batch = 0;
+        bool is_empty = true;
         while (try_execute(core, is_running)) {
             read_batch++;
+            if (read_batch == max_batch_size) {
+                is_empty = false;
+                break;
+            }
         }
-        if (read_batch > 0) {
-            qd_log(core->log, QD_LOG_TRACE, "Core actions executed %d", read_batch);
-        } else {
-            qd_log(core->log, QD_LOG_TRACE, "No core actions available");
-        }
-
         //
         // Activate all connections that were flagged for activation during the above processing
         //
@@ -174,8 +175,8 @@ void *router_core_thread(void *arg)
             DEQ_MOVE(core->delivery_cleanup_list, work->delivery_cleanup_list);
             qdr_post_general_work_CT(core, work);
         }
-        //This cascade of isEmpty chceks must be preserved to save sleeping if possible
-        if (fs_rb_is_empty(&core->action_list)) {
+        //This cascade of isEmpty checks must be preserved to save sleeping if possible
+        if (is_empty && fs_rb_is_empty(&core->action_list)) {
             //we need a full barrier to avoid fs_rb_is_empty() to move before this
             atomic_store_explicit(&core->core_status.sleeping, true, memory_order_seq_cst);
             if (fs_rb_is_empty(&core->action_list)) {

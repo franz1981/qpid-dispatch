@@ -17,12 +17,12 @@ index_t fs_rb_capacity(const index_t requested_capacity, const uint32_t message_
     return (next_pow_2_requested_capacity * aligned_message_size);
 }
 
-uint64_t fs_rb_load_consumer_position(const struct fs_rb_t *const header) {
+inline uint64_t fs_rb_load_consumer_position(const struct fs_rb_t *const header) {
     const uint64_t position = atomic_load_explicit(&header->consumer.consumer_position, memory_order_relaxed);
     return position;
 }
 
-uint64_t fs_rb_load_producer_position(const struct fs_rb_t *const header) {
+inline uint64_t fs_rb_load_producer_position(const struct fs_rb_t *const header) {
     const uint64_t position = atomic_load_explicit(&header->producer.producer_position, memory_order_relaxed);
     return position;
 }
@@ -75,7 +75,7 @@ static bool sp_claim_slow_path(uint8_t *const buffer, const index_t message_stat
     }
 }
 
-bool try_fs_rb_sp_claim(const struct fs_rb_t *const header,
+inline bool try_fs_rb_sp_claim(const struct fs_rb_t *const header,
                         uint8_t **const claimed_message) {
     const uint32_t look_ahead_step = header->look_ahead_step;
     uint8_t *const buffer = header->buffer;
@@ -112,7 +112,38 @@ static bool mp_claim_slow_path(const _Atomic uint64_t *const consumer_position_a
     }
 }
 
-bool try_fs_rb_mp_claim(
+inline claim_result_t try_fs_rb_mp_fail_fast_claim(
+        const struct fs_rb_t *const header,
+        uint8_t **const claimed_message) {
+    uint8_t *const buffer = header->buffer;
+    const index_t mask = header->mask;
+    const index_t capacity = header->capacity;
+    const index_t aligned_message_size = header->aligned_message_size;
+    int64_t producer_position = atomic_load_explicit(&header->producer.producer_position, memory_order_acquire);
+    int64_t consumer_cache_position = atomic_load_explicit(&header->producer.consumer_cache_position,
+                                                           memory_order_relaxed);
+    const int64_t wrap_point = producer_position - capacity;
+    if (consumer_cache_position <= wrap_point) {
+        //is *REALLY* full?
+        if (!mp_claim_slow_path(&header->consumer.consumer_position, &header->producer.consumer_cache_position,
+                                wrap_point,
+                                &consumer_cache_position)) {
+            return FULL;
+        }
+    }
+    //i'm using memory_order_seq_cst instead of release for an additional guarantee
+    //for weaker memory model archs: a full barrier means that the offering thread could rely
+    //on seq_cst offer
+    if (!atomic_compare_exchange_weak_explicit(&header->producer.producer_position, &producer_position,
+                                               producer_position + 1, memory_order_seq_cst, memory_order_relaxed)) {
+        return CONTENTED;
+    }
+    const index_t message_state_offset = (producer_position & mask) * aligned_message_size;
+    *claimed_message = buffer + message_state_offset + MESSAGE_STATE_SIZE;
+    return SUCCEED;
+}
+
+inline bool try_fs_rb_mp_claim(
         const struct fs_rb_t *const header,
         uint8_t **const claimed_message) {
     uint8_t *const buffer = header->buffer;
@@ -140,13 +171,13 @@ bool try_fs_rb_mp_claim(
     return true;
 }
 
-void fs_rb_commit_claim(const uint8_t *const claimed_message_address) {
+inline void fs_rb_commit_claim(const uint8_t *const claimed_message_address) {
     const _Atomic uint32_t *const message_state = (_Atomic uint32_t *) (claimed_message_address - MESSAGE_STATE_SIZE);
     atomic_store_explicit(message_state, MESSAGE_STATE_BUSY, memory_order_release);
 }
 
 
-bool try_fs_rb_claim_read(const struct fs_rb_t *const header,
+inline bool try_fs_rb_claim_read(const struct fs_rb_t *const header,
                           uint64_t *claimed_position,
                           uint8_t **const read_message_address) {
     uint8_t *const buffer = header->buffer;
@@ -178,7 +209,7 @@ bool try_fs_rb_claim_read(const struct fs_rb_t *const header,
 }
 
 
-void fs_rb_commit_read(const struct fs_rb_t *const header, const uint64_t claimed_position,
+inline void fs_rb_commit_read(const struct fs_rb_t *const header, const uint64_t claimed_position,
                        uint8_t *const read_message_address) {
     const _Atomic uint32_t *const message_state_address = (_Atomic uint32_t *) (read_message_address -
                                                                                 MESSAGE_STATE_SIZE);
@@ -189,7 +220,7 @@ void fs_rb_commit_read(const struct fs_rb_t *const header, const uint64_t claime
     atomic_store_explicit(&header->consumer.consumer_position, claimed_position + 1, memory_order_release);
 }
 
-uint32_t fs_rb_read(
+inline uint32_t fs_rb_read(
         const struct fs_rb_t *const header,
         const fs_rb_message_consumer consumer,
         const uint32_t count, void *const context) {
@@ -224,13 +255,13 @@ uint32_t fs_rb_read(
     return count;
 }
 
-bool fs_rb_is_empty(const struct fs_rb_t *const header) {
+inline bool fs_rb_is_empty(const struct fs_rb_t *const header) {
     const uint64_t consumer_position = atomic_load_explicit(&header->consumer.consumer_position, memory_order_relaxed);
     const uint64_t producer_position = atomic_load_explicit(&header->producer.producer_position, memory_order_relaxed);
     return producer_position == consumer_position;
 }
 
-index_t fs_rb_size(const struct fs_rb_t *const header) {
+inline index_t fs_rb_size(const struct fs_rb_t *const header) {
     uint64_t consumer_position = atomic_load_explicit(&header->consumer.consumer_position, memory_order_relaxed);
     while (true) {
         const uint64_t before = consumer_position;

@@ -67,11 +67,10 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     atomic_store_explicit(&core->core_status.wakeup.signaling, false, memory_order_release);
     core->running     = true;
     //init action_list
-    //TODO add a configuration parameter for this
-    const index_t requested_capacity = 16 * 1024;
+    const index_t requested_capacity = qd->action_list_capacity;
     const uint32_t msg_size = sizeof(qdr_action_t);
     const index_t buffer_capacity = fs_rb_capacity(requested_capacity, msg_size);
-    qd_log(core->log, QD_LOG_TRACE, "Buffer capacity for action_list is %d bytes for %d elements of size %d",
+    qd_log(core->log, QD_LOG_INFO, "Buffer capacity for action_list is %d bytes for %d elements of size %d bytes",
            buffer_capacity, requested_capacity, msg_size);
     uint8_t * buffer = aligned_alloc(PAGE_SIZE, buffer_capacity);
     new_fs_rb(&core->action_list, requested_capacity, msg_size);
@@ -358,15 +357,26 @@ inline qdr_action_t qdr_action(qdr_action_handler_t action_handler, const char *
 void qdr_action_enqueue(qdr_core_t *const core, qdr_action_t *const action) {
     uint8_t *msg_claim = NULL;
     const int thread_count = core->qd->thread_count;
+    long failed_attempts = 0;
+    long is_full = 0;
+    long contended = 0;
     if (thread_count == 1) {
         while (!try_fs_rb_sp_claim(&core->action_list, &msg_claim)) {
-            //TODO instead of spinning would be great to return from qdr_action_enqueue, propagating back-pressure
+            failed_attempts++;
+            is_full++;
         }
     } else {
-        while (!try_fs_rb_mp_claim(&core->action_list, &msg_claim)) {
-            //TODO instead of spinning would be great to return from qdr_action_enqueue, propagating back-pressure
+        claim_result_t claim;
+        while ((claim = try_fs_rb_mp_fail_fast_claim(&core->action_list, &msg_claim)) != SUCCEED) {
+            failed_attempts++;
+            if (claim == CONTENTED) {
+                contended++;
+            } else if (claim == FULL) {
+                is_full++;
+            }
         }
     }
+    //TODO(franz): this threshold could be made configurable or just provide this metrics externally
     memcpy(msg_claim, action, sizeof(qdr_action_t));
     fs_rb_commit_claim(msg_claim);
     if (thread_count == 1) {
@@ -377,6 +387,16 @@ void qdr_action_enqueue(qdr_core_t *const core, qdr_action_t *const action) {
     //try_fs_rb_mp_claim() already perform a seq_cst operation on producer_sequence
     //ie no need to use a full memory barrier here
     wakeup_core(core);
+    //report only at the end of the hot path ie while holding the ring_buffer claim
+    if (failed_attempts > 0) {
+        if (is_full > 0) {
+            qd_log(core->log, QD_LOG_INFO, "qdr_action_enqueue succeed after %d/%d full\t%d/%d contended failures",
+                   is_full, failed_attempts, contended, failed_attempts);
+        } else if (contended > core->qd->thread_count) {
+            qd_log(core->log, QD_LOG_INFO, "qdr_action_enqueue succeed after %d/%d full\t%d/%d contended failures",
+                   is_full, failed_attempts, contended, failed_attempts);
+        }
+    }
 }
 
 qdr_address_t *qdr_address_CT(qdr_core_t *core, qd_address_treatment_t treatment, qdr_address_config_t *config)
