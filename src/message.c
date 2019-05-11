@@ -36,9 +36,10 @@
 #include <time.h>
 #include <inttypes.h>
 #include <assert.h>
+#include <pthread.h>
 
-#define LOCK   sys_mutex_lock
-#define UNLOCK sys_mutex_unlock
+#define LOCK   pthread_spin_lock
+#define UNLOCK pthread_spin_unlock
 
 const char *STR_AMQP_NULL = "null";
 const char *STR_AMQP_TRUE = "T";
@@ -907,7 +908,7 @@ qd_message_t *qd_message()
     }
 
     ZERO(msg->content);
-    msg->content->lock = sys_mutex();
+    pthread_spin_init(&msg->content->lock, 0);
     sys_atomic_init(&msg->content->ref_count, 1);
     msg->content->parse_depth = QD_DEPTH_NONE;
 
@@ -933,7 +934,7 @@ void qd_message_free(qd_message_t *in_msg)
         // counts starting with the msg cursor.  If the buffer count drops to
         // zero we can free it.
         //
-        LOCK(content->lock);
+        LOCK(&content->lock);
 
         qd_buffer_t *buf = msg->cursor.buffer;
         while (buf) {
@@ -946,7 +947,7 @@ void qd_message_free(qd_message_t *in_msg)
         }
         --content->fanout;
 
-        UNLOCK(content->lock);
+        UNLOCK(&content->lock);
     }
 
     rc = sys_atomic_dec(&content->ref_count) - 1;
@@ -967,7 +968,7 @@ void qd_message_free(qd_message_t *in_msg)
         if (content->pending)
             qd_buffer_free(content->pending);
 
-        sys_mutex_free(content->lock);
+        pthread_spin_destroy(&content->lock);
         free_qd_message_content_t(content);
     }
 
@@ -1116,7 +1117,7 @@ void qd_message_add_fanout(qd_message_t *in_msg,
 
     qd_message_content_t *content = msg->content;
 
-    LOCK(content->lock);
+    LOCK(&content->lock);
     ++content->fanout;
 
     // do not free the buffers until all fanout consumers are done with them
@@ -1125,7 +1126,7 @@ void qd_message_add_fanout(qd_message_t *in_msg,
         qd_buffer_inc_fanout(buf);
         buf = DEQ_NEXT(buf);
     }
-    UNLOCK(content->lock);
+    UNLOCK(&content->lock);
 }
 
 
@@ -1292,7 +1293,7 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
 
         if (at_eos || recv_error) {
             // Message is complete
-            LOCK(content->lock);
+            LOCK(&content->lock);
             {
                 // Append last buffer if any with data
                 if (content->pending) {
@@ -1317,7 +1318,7 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
                 // unlink message and delivery
                 pn_record_set(record, PN_DELIVERY_CTX, 0);
             }
-            UNLOCK(content->lock);
+            UNLOCK(&content->lock);
             break;
         }
 
@@ -1331,18 +1332,18 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
             // Pending buffer exists
             if (qd_buffer_capacity(content->pending) == 0) {
                 // Pending buffer is full
-                LOCK(content->lock);
+                LOCK(&content->lock);
                 qd_buffer_set_fanout(content->pending, content->fanout);
                 DEQ_INSERT_TAIL(content->buffers, content->pending);
                 content->pending = 0;
                 if (qd_message_Q2_holdoff_should_block((qd_message_t *)msg)) {
                     if (!qd_link_is_q2_limit_unbounded(qdl)) {
                         content->q2_input_holdoff = true;
-                        UNLOCK(content->lock);
+                        UNLOCK(&content->lock);
                         break;
                     }
                 }
-                UNLOCK(content->lock);
+                UNLOCK(&content->lock);
                 content->pending = qd_buffer();
             } else {
                 // Pending buffer still has capacity
@@ -1646,7 +1647,7 @@ void qd_message_send(qd_message_t *in_msg,
             bytes_sent = pn_link_send(pnl, (const char*)msg->cursor.cursor, num_bytes_to_send);
         }
 
-        LOCK(content->lock);
+        LOCK(&content->lock);
 
         if (bytes_sent < 0) {
             //
@@ -1723,7 +1724,7 @@ void qd_message_send(qd_message_t *in_msg,
             }
         }
 
-        UNLOCK(content->lock);
+        UNLOCK(&content->lock);
     }
 
     if (content->aborted) {
@@ -1888,9 +1889,9 @@ int qd_message_check(qd_message_t *in_msg, qd_message_depth_t depth)
     qd_message_content_t *content = msg->content;
     int                   result;
 
-    LOCK(content->lock);
+    LOCK(&content->lock);
     result = qd_message_check_LH(content, depth);
-    UNLOCK(content->lock);
+    UNLOCK(&content->lock);
     return result;
 }
 
