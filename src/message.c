@@ -909,9 +909,10 @@ qd_message_t *qd_message()
 
     ZERO(msg->content);
     pthread_spin_init(&msg->content->lock, 0);
-    sys_atomic_init(&msg->content->ref_count, 1);
+    msg->content->ref_count = 1;
     msg->content->parse_depth = QD_DEPTH_NONE;
-
+    //ensure ref count to be safely published along with the other fields
+    atomic_thread_fence(memory_order_release);
     return (qd_message_t*) msg;
 }
 
