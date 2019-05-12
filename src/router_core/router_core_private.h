@@ -755,6 +755,13 @@ struct qdr_core_t {
 
 
     qdr_core_timer_list_t    scheduled_timers;
+    struct {
+        int8_t padding[(2 * CACHE_LINE_LENGTH)];
+        struct {
+            _Atomic uint64_t active_workers;
+            int8_t padding[(2 * CACHE_LINE_LENGTH)];
+        } status;
+    } workers;
     qdr_general_work_list_t  work_list;
     qd_timer_t              *work_timer;
     uint32_t                 uptime_ticks;

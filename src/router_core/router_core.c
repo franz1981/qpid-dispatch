@@ -86,7 +86,7 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     qd_log(core->log, QD_LOG_TRACE, "work_list header has been initialized with aligned_message_size = %d",
            core->work_list.aligned_message_size);
     core->work_list.buffer = aligned_alloc(PAGE_SIZE, work_list_buffer_capacity);
-
+    atomic_store_explicit(&core->workers.status.active_workers, 0, memory_order_seq_cst);
 
 
     core->work_timer = qd_timer(core->qd, qdr_general_handler, core);
@@ -769,22 +769,36 @@ static void qdr_general_handler(void *context)
     const int thread_count = core->qd->thread_count;
     //execute more general work as possible
     uint8_t *msg = NULL;
-    while (true) {
-        if (thread_count == 1) {
-            if (!try_spmc_fs_rb_sc_claim_read(&core->work_list, &msg)) {
-                //not work left to do
-                return;
+    do {
+        atomic_fetch_add_explicit(&core->workers.status.active_workers, 1, memory_order_seq_cst);
+        while (true) {
+            if (thread_count == 1) {
+                if (!try_spmc_fs_rb_sc_claim_read(&core->work_list, &msg)) {
+                    //not work left to do
+                    break;
+                }
+            } else {
+                if (!try_spmc_fs_rb_mc_claim_read(&core->work_list, &msg)) {
+                    //not work left to do
+                    break;
+                }
+            }
+            qdr_general_work_t *work = (qdr_general_work_t *) msg;
+            work->handler(core, work);
+            spmc_fs_rb_commit_read(&core->work_list, msg);
+        }
+        //the last one to left could consider to cleanup any remaining work left
+        if (atomic_fetch_add_explicit(&core->workers.status.active_workers, -1, memory_order_seq_cst) == 1) {
+            if (!spmc_fs_rb_is_empty(&core->work_list)) {
+                continue;
+            } else {
+                break;
             }
         } else {
-            if (!try_spmc_fs_rb_mc_claim_read(&core->work_list, &msg)) {
-                //not work left to do
-                return;
-            }
+            //one of many workers that continue his job
+            break;
         }
-        qdr_general_work_t *work = (qdr_general_work_t *) msg;
-        work->handler(core, work);
-        spmc_fs_rb_commit_read(&core->work_list, msg);
-    }
+    } while (true);
 }
 
 
@@ -815,8 +829,9 @@ void qdr_post_general_work_CT(qdr_core_t *core, qdr_general_work_t *work)
     }
     memcpy(claimed_msg, work, sizeof(qdr_general_work_t));
     spmc_fs_rb_commit_claim(&core->work_list, claimed_pos);
-    //TODO UGLY!! Plase use a better way to handle this
-    if (!spmc_fs_rb_is_empty(&core->work_list)) {
+    //need full barrier because the ring buffer is not using any HW barrier
+    atomic_thread_fence(memory_order_seq_cst);
+    if (atomic_load_explicit(&core->workers.status.active_workers, memory_order_acquire) <= 0) {
         qd_timer_schedule(core->work_timer, 0);
     }
 }
