@@ -26,6 +26,7 @@
 #include <qpid/dispatch/atomic.h>
 #include <qpid/dispatch/log.h>
 #include "../queue/fs_rb.h"
+#include "../queue/spmc_fs_rb.h"
 #include <memory.h>
 
 typedef struct qdr_address_t         qdr_address_t;
@@ -203,6 +204,8 @@ struct qdr_action_t {
 ALLOC_DECLARE(qdr_action_t);
 
 typedef struct fs_rb_t qdr_action_list_t;
+
+typedef struct spmc_fs_rb_t qdr_general_work_list_t;
 //
 //
 //
@@ -229,7 +232,6 @@ typedef struct qdr_general_work_t qdr_general_work_t;
 typedef void (*qdr_general_work_handler_t) (qdr_core_t *core, qdr_general_work_t *work);
 
 struct qdr_general_work_t {
-    DEQ_LINKS(qdr_general_work_t);
     qdr_general_work_handler_t   handler;
     qdr_field_t                 *field;
     int                          maskbit;
@@ -244,10 +246,7 @@ struct qdr_general_work_t {
     void                       *context;
 };
 
-ALLOC_DECLARE(qdr_general_work_t);
-DEQ_DECLARE(qdr_general_work_t, qdr_general_work_list_t);
-
-qdr_general_work_t *qdr_general_work(qdr_general_work_handler_t handler);
+qdr_general_work_t qdr_general_work(qdr_general_work_handler_t handler);
 
 
 //
@@ -755,7 +754,6 @@ struct qdr_core_t {
     } core_status;
 
 
-    sys_mutex_t             *work_lock;
     qdr_core_timer_list_t    scheduled_timers;
     qdr_general_work_list_t  work_list;
     qd_timer_t              *work_timer;

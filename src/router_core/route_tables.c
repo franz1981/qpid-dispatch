@@ -786,26 +786,26 @@ static void qdr_do_link_lost(qdr_core_t *core, qdr_general_work_t *work)
 
 void qdr_post_mobile_added_CT(qdr_core_t *core, const char *address_hash, qd_address_treatment_t treatment)
 {
-    qdr_general_work_t *work = qdr_general_work(qdr_do_mobile_added);
-    work->field = qdr_field(address_hash);
-    work->treatment = treatment;
-    qdr_post_general_work_CT(core, work);
+    qdr_general_work_t work = qdr_general_work(qdr_do_mobile_added);
+    work.field = qdr_field(address_hash);
+    work.treatment = treatment;
+    qdr_post_general_work_CT(core, &work);
 }
 
 
 void qdr_post_mobile_removed_CT(qdr_core_t *core, const char *address_hash)
 {
-    qdr_general_work_t *work = qdr_general_work(qdr_do_mobile_removed);
-    work->field = qdr_field(address_hash);
-    qdr_post_general_work_CT(core, work);
+    qdr_general_work_t work = qdr_general_work(qdr_do_mobile_removed);
+    work.field = qdr_field(address_hash);
+    qdr_post_general_work_CT(core, &work);
 }
 
 
 void qdr_post_link_lost_CT(qdr_core_t *core, int link_maskbit)
 {
-    qdr_general_work_t *work = qdr_general_work(qdr_do_link_lost);
-    work->maskbit = link_maskbit;
-    qdr_post_general_work_CT(core, work);
+    qdr_general_work_t work = qdr_general_work(qdr_do_link_lost);
+    work.maskbit = link_maskbit;
+    qdr_post_general_work_CT(core, &work);
 }
 
 

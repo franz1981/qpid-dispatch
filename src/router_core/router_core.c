@@ -25,6 +25,7 @@
 #include "delivery.h"
 #include <stdio.h>
 #include <strings.h>
+#include <queue/spmc_fs_rb.h>
 
 ALLOC_DEFINE(qdr_address_t);
 ALLOC_DEFINE(qdr_address_config_t);
@@ -34,7 +35,6 @@ ALLOC_DEFINE(qdr_link_t);
 ALLOC_DEFINE(qdr_router_ref_t);
 ALLOC_DEFINE(qdr_link_ref_t);
 ALLOC_DEFINE(qdr_delivery_cleanup_t);
-ALLOC_DEFINE(qdr_general_work_t);
 ALLOC_DEFINE(qdr_link_work_t);
 ALLOC_DEFINE(qdr_connection_ref_t);
 ALLOC_DEFINE(qdr_connection_info_t);
@@ -78,8 +78,17 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
            core->action_list.aligned_message_size);
     core->action_list.buffer = buffer;
 
-    core->work_lock = sys_mutex();
-    DEQ_INIT(core->work_list);
+    //allocate work list
+    const index_t work_list_buffer_capacity = fs_rb_capacity(requested_capacity, sizeof(qdr_general_work_t));
+    qd_log(core->log, QD_LOG_INFO, "Buffer capacity for work_list is %d bytes for %d elements of size %d bytes",
+           work_list_buffer_capacity, requested_capacity, sizeof(qdr_general_work_t));
+    new_spmc_fs_rb(&core->work_list, requested_capacity, sizeof(qdr_general_work_t));
+    qd_log(core->log, QD_LOG_TRACE, "work_list header has been initialized with aligned_message_size = %d",
+           core->work_list.aligned_message_size);
+    core->work_list.buffer = aligned_alloc(PAGE_SIZE, work_list_buffer_capacity);
+
+
+
     core->work_timer = qd_timer(core->qd, qdr_general_handler, core);
 
     //
@@ -145,7 +154,6 @@ void qdr_core_free(qdr_core_t *core)
     // Free the core resources
     //
     sys_thread_free(core->thread);
-    sys_mutex_free(core->work_lock);
     sys_mutex_free(core->id_lock);
     qd_timer_free(core->work_timer);
 
@@ -244,6 +252,8 @@ void qdr_core_free(qdr_core_t *core)
 
     //free the action_list buffer
     free(core->action_list.buffer);
+    //fre the general work list
+    free(core->work_list.buffer);
 
     free(core);
 }
@@ -755,45 +765,60 @@ void qdr_del_delivery_ref(qdr_delivery_ref_list_t *list, qdr_delivery_ref_t *ref
 
 static void qdr_general_handler(void *context)
 {
-    qdr_core_t              *core = (qdr_core_t*) context;
-    qdr_general_work_list_t  work_list;
-    qdr_general_work_t      *work;
-
-    sys_mutex_lock(core->work_lock);
-    DEQ_MOVE(core->work_list, work_list);
-    sys_mutex_unlock(core->work_lock);
-
-    work = DEQ_HEAD(work_list);
-    while (work) {
-        DEQ_REMOVE_HEAD(work_list);
+    qdr_core_t *core = (qdr_core_t *) context;
+    const int thread_count = core->qd->thread_count;
+    //execute more general work as possible
+    uint8_t *msg = NULL;
+    while (true) {
+        if (thread_count == 1) {
+            if (!try_spmc_fs_rb_sc_claim_read(&core->work_list, &msg)) {
+                //not work left to do
+                return;
+            }
+        } else {
+            if (!try_spmc_fs_rb_mc_claim_read(&core->work_list, &msg)) {
+                //not work left to do
+                return;
+            }
+        }
+        qdr_general_work_t *work = (qdr_general_work_t *) msg;
         work->handler(core, work);
-        free_qdr_general_work_t(work);
-        work = DEQ_HEAD(work_list);
+        spmc_fs_rb_commit_read(&core->work_list, msg);
     }
 }
 
 
-qdr_general_work_t *qdr_general_work(qdr_general_work_handler_t handler)
+inline qdr_general_work_t qdr_general_work(qdr_general_work_handler_t handler)
 {
-    qdr_general_work_t *work = new_qdr_general_work_t();
-    ZERO(work);
-    work->handler = handler;
+    qdr_general_work_t work;
+    ZERO(&work);
+    work.handler = handler;
     return work;
 }
 
 
 void qdr_post_general_work_CT(qdr_core_t *core, qdr_general_work_t *work)
 {
-    bool notify;
-
-    sys_mutex_lock(core->work_lock);
-    DEQ_ITEM_INIT(work);
-    DEQ_INSERT_TAIL(core->work_list, work);
-    notify = DEQ_SIZE(core->work_list) == 1;
-    sys_mutex_unlock(core->work_lock);
-
-    if (notify)
+    //TODO improve the logic in order to avoid DEADLOCKS with action_list:
+    //- chooose to cleanup deliveries on this same thread ie core
+    //- make workers always able to handle the cleanup by making it cleaning
+    //  up deliveries if action_list is full
+    uint8_t *claimed_msg;
+    uint64_t claimed_pos;
+    uint64_t work_list_full = 0;
+    while (!try_spmc_fs_rb_claim(&core->work_list, &claimed_pos, &claimed_msg)) {
+        //BUUUUUURN :)
+        work_list_full++;
+        if ((work_list_full & 1023) == 0) {
+            qd_log(core->log, QD_LOG_INFO, "General work queue is full from a while...better to enlarge it");
+        }
+    }
+    memcpy(claimed_msg, work, sizeof(qdr_general_work_t));
+    spmc_fs_rb_commit_claim(&core->work_list, claimed_pos);
+    //TODO UGLY!! Plase use a better way to handle this
+    if (!spmc_fs_rb_is_empty(&core->work_list)) {
         qd_timer_schedule(core->work_timer, 0);
+    }
 }
 
 
@@ -849,10 +874,10 @@ static void qdr_global_stats_request_CT(qdr_core_t *core, qdr_action_t *action, 
         stats->deliveries_delayed_1sec = core->deliveries_delayed_1sec;
         stats->deliveries_delayed_1sec = core->deliveries_delayed_10sec;
     }
-    qdr_general_work_t *work = qdr_general_work(qdr_post_global_stats_response);
-    work->stats_handler = action->args.stats_request.handler;
-    work->context = action->args.stats_request.context;
-    qdr_post_general_work_CT(core, work);
+    qdr_general_work_t work = qdr_general_work(qdr_post_global_stats_response);
+    work.stats_handler = action->args.stats_request.handler;
+    work.context = action->args.stats_request.context;
+    qdr_post_general_work_CT(core, &work);
 }
 
 void qdr_request_global_stats(qdr_core_t *core, qdr_global_stats_t *stats, qdr_global_stats_handler_t callback, void *context)

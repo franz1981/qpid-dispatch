@@ -2,8 +2,8 @@
 // Created by forked_franz on 10/02/17.
 //
 
-#ifndef FRANZ_FLOW_FIXED_SIZE_RING_BUFFER_H
-#define FRANZ_FLOW_FIXED_SIZE_RING_BUFFER_H
+#ifndef FRANZ_FLOW_SPMC_FIXED_SIZE_RING_BUFFER_H
+#define FRANZ_FLOW_SPMC_FIXED_SIZE_RING_BUFFER_H
 
 #include <stdbool.h>
 #include "index.h"
@@ -60,4 +60,4 @@ bool spmc_fs_rb_is_empty(const struct spmc_fs_rb_t *const header);
 
 index_t spmc_fs_rb_size(const struct spmc_fs_rb_t *const header);
 
-#endif //FRANZ_FLOW_FIXED_SIZE_RING_BUFFER_H
+#endif //FRANZ_FLOW_SPMC_FIXED_SIZE_RING_BUFFER_H

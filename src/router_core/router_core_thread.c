@@ -171,9 +171,9 @@ void *router_core_thread(void *arg)
         // Schedule the cleanup of deliveries freed during this core-thread pass
         //
         if (DEQ_SIZE(core->delivery_cleanup_list) > 0) {
-            qdr_general_work_t *work = qdr_general_work(qdr_do_message_to_addr_free);
-            DEQ_MOVE(core->delivery_cleanup_list, work->delivery_cleanup_list);
-            qdr_post_general_work_CT(core, work);
+            qdr_general_work_t work = qdr_general_work(qdr_do_message_to_addr_free);
+            DEQ_MOVE(core->delivery_cleanup_list, work.delivery_cleanup_list);
+            qdr_post_general_work_CT(core, &work);
         }
         //This cascade of isEmpty checks must be preserved to save sleeping if possible
         if (is_empty && fs_rb_is_empty(&core->action_list)) {
