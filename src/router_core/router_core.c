@@ -73,6 +73,7 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     qd_log(core->log, QD_LOG_INFO, "Buffer capacity for action_list is %d bytes for %d elements of size %d bytes",
            buffer_capacity, requested_capacity, msg_size);
     uint8_t * buffer = aligned_alloc(PAGE_SIZE, buffer_capacity);
+    memset(buffer, 0, buffer_capacity);
     new_fs_rb(&core->action_list, requested_capacity, msg_size);
     qd_log(core->log, QD_LOG_TRACE, "action_list header has been initialized with aligned_message_size = %d",
            core->action_list.aligned_message_size);
@@ -86,6 +87,7 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     qd_log(core->log, QD_LOG_TRACE, "work_list header has been initialized with aligned_message_size = %d",
            core->work_list.aligned_message_size);
     core->work_list.buffer = aligned_alloc(PAGE_SIZE, work_list_buffer_capacity);
+    memset(core->work_list.buffer, 0, work_list_buffer_capacity);
     atomic_store_explicit(&core->workers.status.active_workers, 0, memory_order_seq_cst);
 
 

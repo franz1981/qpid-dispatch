@@ -24,9 +24,11 @@
 #include <memory.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <sys/user.h>
 #include "entity.h"
 #include "entity_cache.h"
 #include "config.h"
+#include "queue/mpmc_fs_rb.h"
 
 const char *QD_ALLOCATOR_TYPE = "allocator";
 
@@ -54,6 +56,9 @@ struct qd_alloc_item_t {
 
 DEQ_DECLARE(qd_alloc_item_t, qd_alloc_item_list_t);
 
+struct qd_global_alloc_pool_t {
+    struct mpmc_fs_rb_t free_list;
+};
 
 struct qd_alloc_pool_t {
     DEQ_LINKS(qd_alloc_pool_t);
@@ -83,9 +88,12 @@ static void qd_alloc_init(qd_alloc_type_desc_t *desc)
 
         assert (desc->config->local_free_list_max >= desc->config->transfer_batch_size);
 
-        desc->global_pool = NEW(qd_alloc_pool_t);
-        DEQ_ITEM_INIT(desc->global_pool);
-        DEQ_INIT(desc->global_pool->free_list);
+        desc->global_pool = NEW(qd_global_alloc_pool_t);
+        int capacity = 1024 * 1024;
+        desc->global_pool->free_list.buffer = aligned_alloc(PAGE_SIZE,
+                                                            mpmc_fs_rb_capacity(capacity,
+                                                                                sizeof(qd_alloc_item_t *)));
+        new_mpmc_fs_rb(&desc->global_pool->free_list, capacity, sizeof(qd_alloc_item_t *));
         desc->lock = sys_mutex();
         DEQ_INIT(desc->tpool_list);
 #if QD_MEMORY_STATS
@@ -137,10 +145,11 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
     // Fast case: If there's an item on the local free list, take it off the
     // list and return it.  Since everything we've touched is thread-local,
     // there is no need to acquire a lock.
+    // Prefer to remove from the tail, because it is more likely to be used recently
     //
-    qd_alloc_item_t *item = DEQ_HEAD(pool->free_list);
+    qd_alloc_item_t *item = DEQ_TAIL(pool->free_list);
     if (item) {
-        DEQ_REMOVE_HEAD(pool->free_list);
+        DEQ_REMOVE_TAIL(pool->free_list);
 #ifdef QD_MEMORY_DEBUG
         item->desc   = desc;
         item->header = PATTERN_FRONT;
@@ -149,56 +158,56 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
 #endif
         return &item[1];
     }
-
     //
     // The local free list is empty, we need to either rebalance a batch
     // of items from the global list or go to the heap to get new memory.
     //
-    sys_mutex_lock(desc->lock);
-    bool allocate_locally = false;
-    if (DEQ_SIZE(desc->global_pool->free_list) >= desc->config->transfer_batch_size) {
+    uint64_t global_free_list_size = mpmc_fs_rb_size(&desc->global_pool->free_list);
+    const int transfer_batch_size = desc->config->transfer_batch_size;
+    int to_allocate_locally = transfer_batch_size;
+    if (global_free_list_size >= transfer_batch_size) {
         //
         // Rebalance a full batch from the global free list to the thread list.
         //
+        int real_transfer = 0;
+        for (idx = 0; idx < desc->config->transfer_batch_size; idx++) {
+            uint64_t read_position;
+            uint8_t *read_data;
+            qd_alloc_item_t *item;
+            if (!try_mpmc_fs_rb_claim_read(&desc->global_pool->free_list, &read_position, &read_data)) {
+                break;
+            }
+            uint64_t *ref = (uint64_t *) read_data;
+            item = (qd_alloc_item_t *) *ref;
+            mpmc_fs_rb_commit_read(read_position, read_data);
+            assert(item != NULL);
+            //copy item into the thread local list
+            DEQ_INSERT_TAIL(pool->free_list, item);
+            real_transfer++;
+        }
+    //TODO(franz) the statistics are not thread-safe anymore!
 #if QD_MEMORY_STATS
         desc->stats->batches_rebalanced_to_threads++;
         desc->stats->held_by_threads += desc->config->transfer_batch_size;
+        to_allocate_locally = transfer_batch_size - real_transfer;
 #endif
-        for (idx = 0; idx < desc->config->transfer_batch_size; idx++) {
-            item = DEQ_HEAD(desc->global_pool->free_list);
-            DEQ_REMOVE_HEAD(desc->global_pool->free_list);
-            DEQ_INSERT_TAIL(pool->free_list, item);
-        }
     } else {
-        allocate_locally = true;
-#if QD_MEMORY_STATS
         desc->stats->held_by_threads += desc->config->transfer_batch_size;
         desc->stats->total_alloc_from_heap += desc->config->transfer_batch_size;
-#endif
     }
-
-    sys_mutex_unlock(desc->lock);
-
-    if (allocate_locally) {
-        //
-        // Allocate a full batch from the heap and put it on the thread list.
-        //
-        for (idx = 0; idx < desc->config->transfer_batch_size; idx++) {
-            size_t size = sizeof(qd_alloc_item_t) + desc->total_size
-                          #ifdef QD_MEMORY_DEBUG
-                          + sizeof(uint32_t)
+    for (idx = 0; idx < to_allocate_locally; idx++) {
+        size_t size = sizeof(qd_alloc_item_t) + desc->total_size
+#ifdef QD_MEMORY_DEBUG
+        + sizeof(uint32_t)
 #endif
-            ;
-            //TODO Think about allocating in chunks eg transfer_batch_size
-            ALLOC_CACHE_ALIGNED(size, item);
-            if (item == 0)
-                break;
-            DEQ_ITEM_INIT(item);
-            DEQ_INSERT_TAIL(pool->free_list, item);
-            item->sequence = 0;
-        }
+        ;
+        ALLOC_CACHE_ALIGNED(size, item);
+        if (item == 0)
+            break;
+        DEQ_ITEM_INIT(item);
+        DEQ_INSERT_TAIL(pool->free_list, item);
+        item->sequence = 0;
     }
-
     assert(DEQ_SIZE(pool->free_list) == desc->config->transfer_batch_size);
     item = DEQ_HEAD(pool->free_list);
     if (item) {
@@ -261,46 +270,32 @@ void qd_dealloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool, char *p)
     // We've exceeded the maximum size of the local free list.  A batch must be
     // rebalanced back to the global list.
     //
-    sys_mutex_lock(desc->lock);
 #if QD_MEMORY_STATS
     desc->stats->batches_rebalanced_to_global++;
     desc->stats->held_by_threads -= available_transfert_size;
 #endif
 
-    // perform sweeping of global pool: not necessary most of the time
-    // If there's a global_free_list size limit, remove items until the limit is
-    // not exceeded.
-    //
-    if (desc->config->global_free_list_max != 0) {
-        const int to_be_free = DEQ_SIZE(desc->global_pool->free_list) - desc->config->global_free_list_max;
-        for (int i = 0; i < to_be_free; i++) {
-            item = DEQ_HEAD(desc->global_pool->free_list);
-            DEQ_REMOVE_HEAD(desc->global_pool->free_list);
-            free(item);
-        }
-#if QD_MEMORY_STATS
-        desc->stats->total_free_to_heap += to_be_free;
-#endif
-    }
     //transfer into the global pool as much as possible from the available local free list without
-    //exceeding global max capacity
-    int to_transfer = available_transfert_size;
-    if (desc->config->global_free_list_max != 0) {
-        const int available_in_global_pool = desc->config->global_free_list_max - DEQ_SIZE(desc->global_pool->free_list);
-        to_transfer = available_transfert_size <= available_in_global_pool ? available_transfert_size
-                                                                                    : available_in_global_pool;
-    }
-    for (idx = 0; idx < to_transfer; idx++) {
+    //exceeding global max capacity are if is full
+    int transferred = 0;
+    for (int i = 0; i < available_transfert_size; i++) {
         item = DEQ_HEAD(pool->free_list);
+        uint64_t claimed_position;
+        uint8_t *claimed_message;
+        if (!try_mpmc_fs_rb_claim(&desc->global_pool->free_list, &claimed_position, &claimed_message)) {
+            break;
+        }
+        uint64_t *ref = (uint64_t *) claimed_message;
+        *ref = (uint64_t) item;
+        mpmc_fs_rb_commit_claim(claimed_position, claimed_message);
         DEQ_REMOVE_HEAD(pool->free_list);
-        DEQ_INSERT_TAIL(desc->global_pool->free_list, item);
+        transferred++;
     }
+    int to_be_free =  available_transfert_size - transferred;
 
-    int to_be_free =  available_transfert_size - to_transfer;
 #if QD_MEMORY_STATS
     desc->stats->total_free_to_heap+=to_be_free;
 #endif
-    sys_mutex_unlock(desc->lock);
 
     //free the remaining elements left from the original transfer_batch_size
     for (idx = 0; idx < to_be_free; idx++) {
@@ -360,15 +355,22 @@ void qd_alloc_finalize(void)
         //
         // Reclaim the items on the global free pool
         //
-        item = DEQ_HEAD(desc->global_pool->free_list);
-        while (item) {
-            DEQ_REMOVE_HEAD(desc->global_pool->free_list);
+        while (true) {
+            uint64_t read_position;
+            uint8_t *read_data;
+            qd_alloc_item_t *item;
+            if (!try_mpmc_fs_rb_claim_read(&desc->global_pool->free_list, &read_position, &read_data)) {
+                break;
+            }
+            uint64_t *ref = (uint64_t *) read_data;
+            item = (qd_alloc_item_t *) *ref;
+            mpmc_fs_rb_commit_read(read_position, read_data);
             free(item);
 #if QD_MEMORY_STATS
             desc->stats->total_free_to_heap++;
 #endif
-            item = DEQ_HEAD(desc->global_pool->free_list);
         }
+        free(desc->global_pool->free_list.buffer);
         free(desc->global_pool);
         desc->global_pool = 0;
 

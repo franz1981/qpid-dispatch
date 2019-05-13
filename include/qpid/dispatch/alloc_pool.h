@@ -33,6 +33,8 @@
  * @internal
  */
 
+/** Global Allocation pool */
+typedef struct qd_global_alloc_pool_t qd_global_alloc_pool_t;
 /** Allocation pool */
 typedef struct qd_alloc_pool_t qd_alloc_pool_t;
 
@@ -63,7 +65,7 @@ typedef struct {
     size_t                total_size;
     qd_alloc_config_t    *config;
     qd_alloc_stats_t     *stats           __attribute__((aligned(64)));
-    qd_alloc_pool_t      *global_pool;
+    qd_global_alloc_pool_t *global_pool;
     sys_mutex_t          *lock;
     qd_alloc_pool_list_t  tpool_list;
     uint32_t              trailer;
