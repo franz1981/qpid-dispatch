@@ -27,6 +27,10 @@
 #include "entity.h"
 #include "entity_cache.h"
 #include "config.h"
+#include <xmmintrin.h>
+
+#define PREFETCH_T0(addr,bytes_ahead) _mm_prefetch(((char *)(addr))+bytes_ahead,_MM_HINT_T0)
+#define PREFETCH_EXACT_T0(addr) _mm_prefetch(((char *)(addr)),_MM_HINT_T0)
 
 const char *QD_ALLOCATOR_TYPE = "allocator";
 
@@ -138,15 +142,19 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
     // list and return it.  Since everything we've touched is thread-local,
     // there is no need to acquire a lock.
     //
-    qd_alloc_item_t *item = DEQ_HEAD(pool->free_list);
+    qd_alloc_item_t *item = DEQ_TAIL(pool->free_list);
     if (item) {
-        DEQ_REMOVE_HEAD(pool->free_list);
+        DEQ_REMOVE_TAIL(pool->free_list);
 #ifdef QD_MEMORY_DEBUG
         item->desc   = desc;
         item->header = PATTERN_FRONT;
         *((uint32_t*) ((char*) &item[1] + desc->total_size))= PATTERN_BACK;
         QD_MEMORY_FILL(&item[1], QD_MEMORY_INIT, desc->total_size);
 #endif
+        qd_alloc_item_t *next = DEQ_NEXT(item);
+        if (next) {
+            PREFETCH_EXACT_T0(&next[1]);
+        }
         return &item[1];
     }
 
@@ -192,15 +200,19 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
     }
     sys_mutex_unlock(desc->lock);
 
-    item = DEQ_HEAD(pool->free_list);
+    item = DEQ_TAIL(pool->free_list);
     if (item) {
-        DEQ_REMOVE_HEAD(pool->free_list);
+        DEQ_REMOVE_TAIL(pool->free_list);
 #ifdef QD_MEMORY_DEBUG
         item->desc = desc;
         item->header = PATTERN_FRONT;
         *((uint32_t*) ((char*) &item[1] + desc->total_size))= PATTERN_BACK;
         QD_MEMORY_FILL(&item[1], QD_MEMORY_INIT, desc->total_size);
 #endif
+        qd_alloc_item_t *next = DEQ_NEXT(item);
+        if (next) {
+            PREFETCH_EXACT_T0(&next[1]);
+        }
         return &item[1];
     }
 
