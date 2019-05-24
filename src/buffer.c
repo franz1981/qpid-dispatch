@@ -22,7 +22,10 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <xmmintrin.h>
 
+#define PREFETCH_T0(addr,bytes_ahead) _mm_prefetch(((char *)(addr))+bytes_ahead,_MM_HINT_T0)
+#define PREFETCH_EXACT_T0(addr) _mm_prefetch(((char *)(addr)),_MM_HINT_T0)
 
 size_t BUFFER_SIZE     = 512;
 static int size_locked = 0;
@@ -47,6 +50,13 @@ qd_buffer_t *qd_buffer(void)
     buf->size   = 0;
     sys_atomic_init(&buf->bfanout, 0);
     return buf;
+}
+
+static inline void init_qd_buffer(qd_buffer_t *buf)
+{
+    DEQ_ITEM_INIT(buf);
+    buf->size = 0;
+    sys_atomic_init(&buf->bfanout, 0);
 }
 
 
@@ -119,24 +129,55 @@ unsigned int qd_buffer_list_clone(qd_buffer_list_t *dst, const qd_buffer_list_t 
 {
     uint32_t len = 0;
     DEQ_INIT(*dst);
+    const size_t src_size = DEQ_SIZE(*src);
+    size_t dst_min_count = src_size;
+    if (dst_min_count == 0) {
+        return 0;
+    }
+    //prefetch the first buf
     qd_buffer_t *buf = DEQ_HEAD(*src);
-    while (buf) {
+    PREFETCH_EXACT_T0(buf);
+    //preallocate the min dst buffer count
+    //prefetch the top of the stack
+    qd_buffer_t *next_buf;
+    qd_buffer_t *current_copy = new_qd_buffer_t();
+    PREFETCH_EXACT_T0(current_copy);
+    for (int i = 0; i < src_size; i++) {
+        next_buf = DEQ_NEXT(buf);
+        if (next_buf) {
+            //start prefetching of the next buffer
+            PREFETCH_EXACT_T0(next_buf);
+        }
         size_t to_copy = qd_buffer_size(buf);
         unsigned char *src = qd_buffer_base(buf);
         len += to_copy;
         while (to_copy) {
-            qd_buffer_t *newbuf = qd_buffer();
+            assert(current_copy != NULL);
+            qd_buffer_t *newbuf = current_copy;
+            //it should be prefetched
+            init_qd_buffer(newbuf);
             size_t count = qd_buffer_capacity(newbuf);
             // default buffer capacity may have changed,
             // so don't assume it will fit:
             if (count > to_copy) count = to_copy;
+            //preallocate and prefetch a copy if:
+            //- we need another dst buffer
+            //- we have another src_buffer
+            if (next_buf || to_copy > count) {
+                //just create: no initialization
+                current_copy = new_qd_buffer_t();
+                //start prefetching of the next copy
+                PREFETCH_EXACT_T0(current_copy);
+            } else {
+                current_copy = NULL;
+            }
             memcpy(qd_buffer_cursor(newbuf), src, count);
             qd_buffer_insert(newbuf, count);
             DEQ_INSERT_TAIL(*dst, newbuf);
             src += count;
             to_copy -= count;
         }
-        buf = DEQ_NEXT(buf);
+        buf = next_buf;
     }
     return len;
 }
