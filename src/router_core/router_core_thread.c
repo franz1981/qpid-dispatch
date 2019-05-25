@@ -136,7 +136,7 @@ void qdr_modules_finalize(qdr_core_t *core)
 void *router_core_thread(void *arg)
 {
     qdr_core_t        *core = (qdr_core_t*) arg;
-
+    initialize_tlab_buffers();
     qdr_forwarder_setup_CT(core);
     qdr_route_table_setup_CT(core);
     qdr_agent_setup_CT(core);

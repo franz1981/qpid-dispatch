@@ -42,6 +42,8 @@ struct qd_buffer_t {
     sys_atomic_t bfanout;        // The number of receivers for this buffer
 };
 
+void initialize_tlab_buffers();
+
 /**
  * Set the initial buffer capacity to be allocated by future calls to qp_buffer.
  */

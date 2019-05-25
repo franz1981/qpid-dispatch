@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <xmmintrin.h>
+#include <queue/fs_rb.h>
 
 #define PREFETCH_T0(addr,bytes_ahead) _mm_prefetch(((char *)(addr))+bytes_ahead,_MM_HINT_T0)
 #define PREFETCH_EXACT_T0(addr) _mm_prefetch(((char *)(addr)),_MM_HINT_T0)
@@ -32,7 +33,16 @@ static int size_locked = 0;
 
 ALLOC_DECLARE(qd_buffer_t);
 ALLOC_DEFINE_CONFIG(qd_buffer_t, sizeof(qd_buffer_t), &BUFFER_SIZE, 0);
+static struct fs_rb_t TLAB_BUFFERS;
 
+void initialize_tlab_buffers()
+{
+    int requested_capacity = 16 * 1024;
+    new_fs_rb(&TLAB_BUFFERS, requested_capacity, sizeof(qd_buffer_t *));
+    int bytes = fs_rb_capacity(requested_capacity, sizeof(qd_buffer_t *));
+    TLAB_BUFFERS.buffer = malloc(bytes);
+    ZERO(TLAB_BUFFERS.buffer);
+}
 
 void qd_buffer_set_size(size_t size)
 {
@@ -125,6 +135,19 @@ unsigned char *qd_buffer_at(qd_buffer_t *buf, size_t len)
     return ((unsigned char*) &buf[1]) + len;
 }
 
+static inline qd_buffer_t *pooled_qd_buffer_t()
+{
+    uint8_t *claim;
+    uint64_t position;
+    if (try_fs_rb_claim_read(&TLAB_BUFFERS, &position, &claim)) {
+        qd_buffer_t *const buffer = *((qd_buffer_t **) claim);
+        fs_rb_commit_read(&TLAB_BUFFERS, position, claim);
+        return buffer;
+    } else {
+        return new_qd_buffer_t();
+    }
+}
+
 unsigned int qd_buffer_list_clone(qd_buffer_list_t *dst, const qd_buffer_list_t *src)
 {
     uint32_t len = 0;
@@ -140,7 +163,7 @@ unsigned int qd_buffer_list_clone(qd_buffer_list_t *dst, const qd_buffer_list_t 
     //preallocate the min dst buffer count
     //prefetch the top of the stack
     qd_buffer_t *next_buf;
-    qd_buffer_t *current_copy = new_qd_buffer_t();
+    qd_buffer_t *current_copy = pooled_qd_buffer_t();
     PREFETCH_EXACT_T0(current_copy);
     for (int i = 0; i < src_size; i++) {
         next_buf = DEQ_NEXT(buf);
@@ -165,7 +188,7 @@ unsigned int qd_buffer_list_clone(qd_buffer_list_t *dst, const qd_buffer_list_t 
             //- we have another src_buffer
             if (next_buf || to_copy > count) {
                 //just create: no initialization
-                current_copy = new_qd_buffer_t();
+                current_copy = pooled_qd_buffer_t();
                 //start prefetching of the next copy
                 PREFETCH_EXACT_T0(current_copy);
             } else {
@@ -182,14 +205,29 @@ unsigned int qd_buffer_list_clone(qd_buffer_list_t *dst, const qd_buffer_list_t 
     return len;
 }
 
+static inline bool recycle_into_tlab(qd_buffer_t *buf)
+{
+    uint8_t *claim;
+    if (try_fs_rb_mp_claim(&TLAB_BUFFERS, &claim)) {
+        sys_atomic_destroy(&buf->bfanout);
+        *((qd_buffer_t **) claim) = buf;
+        fs_rb_commit_claim(claim);
+        return true;
+    } else {
+        return false;
+    }
+}
+
 
 void qd_buffer_list_free_buffers(qd_buffer_list_t *list)
 {
-    qd_buffer_t *buf = DEQ_HEAD(*list);
-    while (buf) {
+    const size_t count = DEQ_SIZE(*list);
+    for (int i = 0; i < count; i++) {
+        qd_buffer_t *buf = DEQ_HEAD(*list);
         DEQ_REMOVE_HEAD(*list);
-        qd_buffer_free(buf);
-        buf = DEQ_HEAD(*list);
+        if (!recycle_into_tlab(buf)) {
+            qd_buffer_free(buf);
+        }
     }
 }
 
