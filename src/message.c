@@ -72,7 +72,6 @@ static const unsigned char * const TAGS_ANY                     = (unsigned char
 PN_HANDLE(PN_DELIVERY_CTX)
 
 ALLOC_DEFINE_CONFIG(qd_message_t, sizeof(qd_message_pvt_t), 0, 0);
-ALLOC_DEFINE(qd_message_content_t);
 
 typedef void (*buffer_process_t) (void *context, const unsigned char *base, int length);
 
@@ -898,18 +897,10 @@ qd_message_t *qd_message()
     msg->send_complete = false;
     msg->tag_sent      = false;
     msg->is_fanout     = false;
-
-    msg->content = new_qd_message_content_t();
-
-    if (msg->content == 0) {
-        free_qd_message_t((qd_message_t*) msg);
-        return 0;
-    }
-
-    ZERO(msg->content);
-    msg->content->lock = sys_mutex();
-    sys_atomic_init(&msg->content->ref_count, 1);
-    msg->content->parse_depth = QD_DEPTH_NONE;
+    ZERO(&msg->content);
+    msg->content.lock = sys_mutex();
+    sys_atomic_init(&msg->content.ref_count, 1);
+    msg->content.parse_depth = QD_DEPTH_NONE;
 
     return (qd_message_t*) msg;
 }
@@ -925,7 +916,7 @@ void qd_message_free(qd_message_t *in_msg)
     qd_buffer_list_free_buffers(&msg->ma_trace);
     qd_buffer_list_free_buffers(&msg->ma_ingress);
 
-    qd_message_content_t *content = msg->content;
+    qd_message_content_t *content = &msg->content;
 
     if (msg->is_fanout) {
         //
@@ -980,7 +971,6 @@ void qd_message_free(qd_message_t *in_msg)
             qd_buffer_free(content->pending);
 
         sys_mutex_free(content->lock);
-        free_qd_message_content_t(content);
     }
 
     free_qd_message_t((qd_message_t*) msg);
@@ -990,7 +980,7 @@ void qd_message_free(qd_message_t *in_msg)
 qd_message_t *qd_message_copy(qd_message_t *in_msg)
 {
     qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
-    qd_message_content_t *content = msg->content;
+    qd_message_content_t *content = &msg->content;
     qd_message_pvt_t     *copy    = (qd_message_pvt_t*) new_qd_message_t();
 
     if (!copy)
@@ -1003,7 +993,7 @@ qd_message_t *qd_message_copy(qd_message_t *in_msg)
     copy->ma_phase = msg->ma_phase;
     copy->strip_annotations_in  = msg->strip_annotations_in;
 
-    copy->content = content;
+    copy->content = *content;
 
     copy->sent_depth    = QD_DEPTH_NONE;
     copy->cursor.buffer = 0;
@@ -1022,7 +1012,7 @@ qd_message_t *qd_message_copy(qd_message_t *in_msg)
 void qd_message_message_annotations(qd_message_t *in_msg)
 {
     qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
-    qd_message_content_t *content = msg->content;
+    qd_message_content_t *content = &msg->content;
 
     if (content->ma_parsed)
         return ;
@@ -1103,7 +1093,7 @@ bool qd_message_is_discard(qd_message_t *msg)
     if (!msg)
         return false;
     qd_message_pvt_t *pvt_msg = (qd_message_pvt_t*) msg;
-    return pvt_msg->content->discard;
+    return pvt_msg->content.discard;
 }
 
 void qd_message_set_discard(qd_message_t *msg, bool discard)
@@ -1112,7 +1102,7 @@ void qd_message_set_discard(qd_message_t *msg, bool discard)
         return;
 
     qd_message_pvt_t *pvt_msg = (qd_message_pvt_t*) msg;
-    pvt_msg->content->discard = discard;
+    pvt_msg->content.discard = discard;
 }
 
 
@@ -1127,7 +1117,7 @@ void qd_message_add_fanout(qd_message_t *in_msg,
     qd_message_pvt_t *msg = (qd_message_pvt_t *)out_msg;
     msg->is_fanout = true;
 
-    qd_message_content_t *content = msg->content;
+    qd_message_content_t *content = &msg->content;
 
     LOCK(content->lock);
     ++content->fanout;
@@ -1172,7 +1162,7 @@ bool qd_message_receive_complete(qd_message_t *in_msg)
     if (!in_msg)
         return false;
     qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
-    return msg->content->receive_complete;
+    return msg->content.receive_complete;
 }
 
 
@@ -1225,9 +1215,9 @@ qd_message_t *discard_receive(pn_delivery_t *delivery,
             break;
         } else if (rc == PN_EOS || rc < 0) {
             // end of message or error. Call the message complete
-            msg->content->receive_complete = true;
-            msg->content->aborted = pn_delivery_aborted(delivery);
-            qd_nullify_safe_ptr(&msg->content->input_link_sp);
+            msg->content.receive_complete = true;
+            msg->content.aborted = pn_delivery_aborted(delivery);
+            qd_nullify_safe_ptr(&msg->content.input_link_sp);
 
             pn_record_t *record = pn_delivery_attachments(delivery);
             pn_record_set(record, PN_DELIVERY_CTX, 0);
@@ -1268,7 +1258,7 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
         msg = (qd_message_pvt_t*) qd_message();
         qd_link_t       *qdl = (qd_link_t *)pn_link_get_context(link);
         qd_connection_t *qdc = qd_link_connection(qdl);
-        set_safe_ptr_qd_link_t(pn_link_get_context(link), &msg->content->input_link_sp);
+        set_safe_ptr_qd_link_t(pn_link_get_context(link), &msg->content.input_link_sp);
         msg->strip_annotations_in  = qd_connection_strip_annotations_in(qdc);
         pn_record_def(record, PN_DELIVERY_CTX, PN_WEAKREF);
         pn_record_set(record, PN_DELIVERY_CTX, (void*) msg);
@@ -1288,14 +1278,14 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
     //      have been processed and freed by outbound processing then
     //      message holdoff is cleared and receiving may continue.
     //
-    if (!qd_link_is_q2_limit_unbounded(qdl) && !msg->content->disable_q2_holdoff) {
-        if (msg->content->q2_input_holdoff) {
+    if (!qd_link_is_q2_limit_unbounded(qdl) && !msg->content.disable_q2_holdoff) {
+        if (msg->content.q2_input_holdoff) {
             return (qd_message_t*)msg;
         }
     }
 
     // Loop until msg is complete, error seen, or incoming bytes are consumed
-    qd_message_content_t *content = msg->content;
+    qd_message_content_t *content = &msg->content;
     bool recv_error = false;
     while (1) {
         //
@@ -1404,7 +1394,7 @@ static void send_handler(void *context, const unsigned char *start, int length)
 
 static void compose_message_annotations_v0(qd_message_pvt_t *msg, qd_buffer_list_t *out)
 {
-    if (msg->content->ma_count > 0) {
+    if (msg->content.ma_count > 0) {
         qd_composed_field_t *out_ma = qd_compose(QD_PERFORMATIVE_MESSAGE_ANNOTATIONS, 0);
 
         qd_compose_start_map(out_ma);
@@ -1413,8 +1403,8 @@ static void compose_message_annotations_v0(qd_message_pvt_t *msg, qd_buffer_list
         // Note that the blob is not inserted here. This code adjusts the
         // size/count of the map that is under construction and the content
         // is inserted by router-node
-        qd_compose_insert_opaque_elements(out_ma, msg->content->ma_count,
-                                          msg->content->field_user_annotations.length);
+        qd_compose_insert_opaque_elements(out_ma, msg->content.ma_count,
+                                          msg->content.field_user_annotations.length);
         qd_compose_end_map(out_ma);
         qd_compose_take_buffers(out_ma, out);
 
@@ -1476,7 +1466,7 @@ static void compose_message_annotations_v1(qd_message_pvt_t *msg, qd_buffer_list
         }
     }
 
-    if (msg->content->ma_count > 0) {
+    if (msg->content.ma_count > 0) {
         // insert the incoming message user blob
         if (!map_started) {
             qd_compose_start_map(out_ma);
@@ -1487,8 +1477,8 @@ static void compose_message_annotations_v1(qd_message_pvt_t *msg, qd_buffer_list
         // Note that the blob is not inserted here. This code adjusts the
         // size/count of the map that is under construction and the content
         // is inserted by router-node
-        qd_compose_insert_opaque_elements(out_ma, msg->content->ma_count,
-                                          msg->content->field_user_annotations.length);
+        qd_compose_insert_opaque_elements(out_ma, msg->content.ma_count,
+                                          msg->content.field_user_annotations.length);
     }
 
     if (field_count > 0) {
@@ -1532,7 +1522,7 @@ void qd_message_send(qd_message_t *in_msg,
                      bool         *q3_stalled)
 {
     qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
-    qd_message_content_t *content = msg->content;
+    qd_message_content_t *content = &msg->content;
     qd_buffer_t          *buf     = 0;
     pn_link_t            *pnl     = qd_link_pn(link);
 
@@ -1900,7 +1890,7 @@ static bool qd_message_check_LH(qd_message_content_t *content, qd_message_depth_
 int qd_message_check(qd_message_t *in_msg, qd_message_depth_t depth)
 {
     qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
-    qd_message_content_t *content = msg->content;
+    qd_message_content_t *content = &msg->content;
     int                   result;
 
     LOCK(content->lock);
@@ -2073,31 +2063,31 @@ void qd_message_compose_4(qd_message_t *msg, qd_composed_field_t *field1, qd_com
 
 qd_parsed_field_t *qd_message_get_ingress    (qd_message_t *msg)
 {
-    return ((qd_message_pvt_t*)msg)->content->ma_pf_ingress;
+    return ((qd_message_pvt_t*)msg)->content.ma_pf_ingress;
 }
 
 
 qd_parsed_field_t *qd_message_get_phase      (qd_message_t *msg)
 {
-    return ((qd_message_pvt_t*)msg)->content->ma_pf_phase;
+    return ((qd_message_pvt_t*)msg)->content.ma_pf_phase;
 }
 
 
 qd_parsed_field_t *qd_message_get_to_override(qd_message_t *msg)
 {
-    return ((qd_message_pvt_t*)msg)->content->ma_pf_to_override;
+    return ((qd_message_pvt_t*)msg)->content.ma_pf_to_override;
 }
 
 
 qd_parsed_field_t *qd_message_get_trace      (qd_message_t *msg)
 {
-    return ((qd_message_pvt_t*)msg)->content->ma_pf_trace;
+    return ((qd_message_pvt_t*)msg)->content.ma_pf_trace;
 }
 
 
 int qd_message_get_phase_val(qd_message_t *msg)
 {
-    return ((qd_message_pvt_t*)msg)->content->ma_int_phase;
+    return ((qd_message_pvt_t*)msg)->content.ma_int_phase;
 }
 
 
@@ -2106,7 +2096,7 @@ void qd_message_Q2_holdoff_disable(qd_message_t *msg)
     if (!msg)
         return;
     qd_message_pvt_t *msg_pvt = (qd_message_pvt_t*) msg;
-    msg_pvt->content->disable_q2_holdoff = true;
+    msg_pvt->content.disable_q2_holdoff = true;
 }
 
 
@@ -2115,25 +2105,25 @@ bool qd_message_Q2_holdoff_should_block(qd_message_t *msg)
     if (!msg)
         return false;
     qd_message_pvt_t *msg_pvt = (qd_message_pvt_t*) msg;
-    return !msg_pvt->content->disable_q2_holdoff && DEQ_SIZE(msg_pvt->content->buffers) >= QD_QLIMIT_Q2_UPPER;
+    return !msg_pvt->content.disable_q2_holdoff && DEQ_SIZE(msg_pvt->content.buffers) >= QD_QLIMIT_Q2_UPPER;
 }
 
 
 bool qd_message_Q2_holdoff_should_unblock(qd_message_t *msg)
 {
-    return DEQ_SIZE(((qd_message_pvt_t*)msg)->content->buffers) < QD_QLIMIT_Q2_LOWER;
+    return DEQ_SIZE(((qd_message_pvt_t*)msg)->content.buffers) < QD_QLIMIT_Q2_LOWER;
 }
 
 
 qd_link_t * qd_message_get_receiving_link(const qd_message_t *msg)
 {
-    return safe_deref_qd_link_t(((qd_message_pvt_t *)msg)->content->input_link_sp);
+    return safe_deref_qd_link_t(((qd_message_pvt_t *)msg)->content.input_link_sp);
 }
 
 
 bool qd_message_aborted(const qd_message_t *msg)
 {
-    return ((qd_message_pvt_t *)msg)->content->aborted;
+    return ((qd_message_pvt_t *)msg)->content.aborted;
 }
 
 void qd_message_set_aborted(const qd_message_t *msg, bool aborted)
@@ -2141,5 +2131,5 @@ void qd_message_set_aborted(const qd_message_t *msg, bool aborted)
     if (!msg)
         return;
     qd_message_pvt_t * msg_pvt = (qd_message_pvt_t *)msg;
-    msg_pvt->content->aborted = aborted;
+    msg_pvt->content.aborted = aborted;
 }
