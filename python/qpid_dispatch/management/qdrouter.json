@@ -453,6 +453,11 @@
                     "description": "The max number of actions to be processed at once",
                     "create": true
                 },
+                "coreLingerSpins": {
+                    "type": "integer",
+                    "description": "The number of spins of the core thread before going to sleep if there is no work to do",
+                    "create": true
+                },
                 "debugDumpFile": {
                     "type": "path",
                     "description": "The absolute path to the location for the debug dump file. The router writes debug-level information to this file if the logger is not available.",

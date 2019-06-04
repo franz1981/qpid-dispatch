@@ -136,23 +136,25 @@ void qdr_modules_finalize(qdr_core_t *core)
 void *router_core_thread(void *arg)
 {
     qdr_core_t        *core = (qdr_core_t*) arg;
-
     qdr_forwarder_setup_CT(core);
     qdr_route_table_setup_CT(core);
     qdr_agent_setup_CT(core);
     //TODO this heuristic is assuming fairness between workers
     const int max_batch_size = core->qd->max_batch_size;
+    const int core_linger_spins = core->qd->core_linger_spins;
     qd_log(core->log, QD_LOG_INFO, "Router Core thread running. %s/%s", core->router_area, core->router_id);
     qd_log(core->log, QD_LOG_INFO, "Using max_batch_size = %d", max_batch_size);
     qdr_modules_init(core);
     atomic_store_explicit(&core->core_status.sleeping, false, memory_order_seq_cst);
     bool is_running;
+    int linger = 0;
     while ((is_running = atomic_load_explicit(&core->running, memory_order_acquire)) ||
            !fs_rb_is_empty(&core->action_list)) {
 
         int read_batch = 0;
         bool is_empty = true;
         while (try_execute(core, is_running)) {
+            linger = 0;
             read_batch++;
             if (read_batch == max_batch_size) {
                 is_empty = false;
@@ -171,6 +173,12 @@ void *router_core_thread(void *arg)
             qdr_general_work_t work = qdr_general_work(qdr_do_message_to_addr_free);
             DEQ_MOVE(core->delivery_cleanup_list, work.delivery_cleanup_list);
             qdr_post_general_work_CT(core, &work);
+        }
+        if (is_empty && linger < core_linger_spins) {
+            linger++;
+            continue;
+        } else {
+            linger = 0;
         }
         //This cascade of isEmpty checks must be preserved to save sleeping if possible
         if (is_empty && fs_rb_is_empty(&core->action_list)) {
