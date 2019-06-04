@@ -202,6 +202,7 @@ qd_error_t qd_dispatch_configure_router(qd_dispatch_t *qd, qd_entity_t *entity)
 
     qd->thread_count = qd_entity_opt_long(entity, "workerThreads", 4); QD_ERROR_RET();
     qd->action_list_capacity = qd_entity_opt_long(entity, "actionListCapacity", 16 * 1024); QD_ERROR_RET();
+    qd->core_linger_spins = qd_entity_opt_long(entity, "coreLingerSpins", 32); QD_ERROR_RET();
     qd->max_batch_size = qd_entity_opt_long(entity, "maxBatchSize", 1024); QD_ERROR_RET();
     qd->allow_resumable_link_route = qd_entity_opt_bool(entity, "allowResumableLinkRoute", true); QD_ERROR_RET();
     qd->timestamps_in_utc = qd_entity_opt_bool(entity, "timestampsInUTC", false); QD_ERROR_RET();
