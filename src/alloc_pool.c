@@ -33,7 +33,7 @@ const char *QD_ALLOCATOR_TYPE = "allocator";
 typedef struct qd_alloc_type_t          qd_alloc_type_t;
 typedef struct qd_alloc_item_t          qd_alloc_item_t;
 typedef struct qd_alloc_chunk_t         qd_alloc_chunk_t;
-typedef struct qd_alloc_linked_stack_t  qd_alloc_linked_stack_t;
+typedef struct qd_alloc_linked_queue_t  qd_alloc_linked_queue_t;
 
 struct qd_alloc_type_t {
     DEQ_LINKS(qd_alloc_type_t);
@@ -56,90 +56,145 @@ struct qd_alloc_item_t {
 //128 has been chosen because many CPUs arch use an
 //adiacent line prefetching optimization that load
 //2*cache line bytes in batch
-#define CHUNK_SIZE 128/sizeof(void*)
+#define CHUNK_SIZE 16
 
 struct qd_alloc_chunk_t {
-    qd_alloc_chunk_t     *prev;                 //do not use DEQ_LINKS here: field position could affect access cost
-    qd_alloc_item_t      *items[CHUNK_SIZE];
-    qd_alloc_chunk_t     *next;
+    qd_alloc_item_t             *items[CHUNK_SIZE];
+    DEQ_LINKS(qd_alloc_chunk_t);
 };
 
-struct qd_alloc_linked_stack_t {
+DEQ_DECLARE(qd_alloc_chunk_t, qd_alloc_chunk_list_t);
+
+struct qd_alloc_linked_queue_t {
     //the base
-    qd_alloc_chunk_t     *top_chunk;
-    uint32_t              top;                  //qd_alloc_item* top_item = top_chunk->items[top+1] <-> top > 0
-    uint64_t              size;
-    qd_alloc_chunk_t      base_chunk;
+    qd_alloc_item_t jump;
+    qd_alloc_chunk_t *producer_chunk;
+    qd_alloc_chunk_t *consumer_chunk;
+    uint64_t producer_index;
+    uint64_t producer_limit;
+    uint64_t consumer_index;
+    qd_alloc_chunk_list_t free_chunks;
+    qd_alloc_chunk_t base_chunk;
 };
 
-static inline void init_stack(qd_alloc_linked_stack_t *stack)
+static inline void init_q(qd_alloc_linked_queue_t *q)
 {
-    stack->top_chunk = &stack->base_chunk;
-    stack->top_chunk->next = NULL;
-    stack->top = 0;
-    stack->size = 0;
+    q->producer_chunk = &q->base_chunk;
+    q->consumer_chunk = &q->base_chunk;
+    q->producer_index = 0;
+    q->consumer_index = 0;
+    ZERO(&q->base_chunk);
+    DEQ_INIT(q->free_chunks);
+    q->producer_limit = CHUNK_SIZE - 2;
 }
 
-static inline qd_alloc_item_t *pop_stack(qd_alloc_linked_stack_t *const stack)
+static inline qd_alloc_item_t *poll_next_chunk_q(qd_alloc_linked_queue_t *const q, uint64_t offset)
 {
-    if (stack->top == 0) {
-        if (stack->size == 0) {
-            assert(stack->top_chunk == &stack->base_chunk);
-            return NULL;
-        }
-        assert(stack->top_chunk != &stack->base_chunk);
-        qd_alloc_chunk_t *prev = stack->top_chunk->prev;
-        //TODO(franz):  stack->top_chunk could be passed externally and walked its nexts
-        //              to recycle the last chunk.
-        //              Just need to pay attention to null out released_chunk->prev->next
-        //              to make it unreachable from the stack
-        stack->top_chunk = prev;
-        stack->top = CHUNK_SIZE;
-    }
-    stack->top--;
-    assert(stack->top >= 0 && stack->top < CHUNK_SIZE);
-    stack->size--;
-    assert(stack->size >= 0);
-    qd_alloc_item_t *item = stack->top_chunk->items[stack->top];
+    assert(q->consumer_chunk->items[offset] == &q->jump);
+    q->consumer_chunk->items[offset] = NULL;
+    qd_alloc_chunk_t *next = q->consumer_chunk->next;
+    assert(next != NULL);
+    q->consumer_chunk->next = NULL;
+    //make it available if new chunks are needed
+    DEQ_INSERT_TAIL(q->free_chunks, q->consumer_chunk);
+    q->consumer_chunk = next;
+    qd_alloc_item_t *item = q->consumer_chunk->items[offset];
     assert(item != NULL);
+    q->consumer_chunk->items[offset] = NULL;
+    q->consumer_index++;
     return item;
 }
 
-static inline void free_stack_chunks(qd_alloc_linked_stack_t *stack)
+static inline qd_alloc_item_t *poll_q(qd_alloc_linked_queue_t *const q)
 {
-    assert(stack->size == 0);
-    //the assumption here is that next is always correctly set
-    qd_alloc_chunk_t *chunk = stack->base_chunk.next;
-    while (chunk != NULL) {
-        qd_alloc_chunk_t *next = chunk->next;
-        free(chunk);
-        chunk = next;
+    const uint64_t offset = q->consumer_index % CHUNK_SIZE;
+    qd_alloc_item_t *item = q->consumer_chunk->items[offset];
+    const bool is_jump = item == &q->jump;
+    if (item != NULL && !is_jump) {
+        q->consumer_index++;
+        q->consumer_chunk->items[offset] = NULL;
+        return item;
+    } else if (is_jump) {
+        return poll_next_chunk_q(q, offset);
+    }
+    return NULL;
+}
+
+static uint64_t size_q(qd_alloc_linked_queue_t *const q)
+{
+    return q->producer_index - q->consumer_index;
+}
+
+static inline void free_q_chunks(qd_alloc_linked_queue_t *q)
+{
+    qd_alloc_item_t *item = NULL;
+    while ((item = poll_q(q)) != NULL) {
+        free(item);
+    }
+    qd_alloc_chunk_t *next = DEQ_HEAD(q->free_chunks);
+    while (next) {
+        DEQ_REMOVE_HEAD(q->free_chunks);
+        if (next != &q->base_chunk) {
+            free(next);
+        }
+        next = DEQ_HEAD(q->free_chunks);
     }
 }
 
-static inline void push_stack(qd_alloc_linked_stack_t *stack, qd_alloc_item_t *item)
+static inline void offer_q_slow_path(qd_alloc_linked_queue_t *q, uint64_t offset, qd_alloc_item_t *item)
 {
-    if (stack->top == CHUNK_SIZE) {
-        qd_alloc_chunk_t *top = stack->top_chunk->next;
-        if (top == NULL) {
-            top = NEW(qd_alloc_chunk_t);
-            stack->top_chunk->next = top;
-            top->prev = stack->top_chunk;
-            top->next = NULL;
+    const uint64_t look_ahead_step = CHUNK_SIZE / 4;
+    const uint64_t producer_limit = q->producer_index + look_ahead_step;
+    if (q->producer_chunk->items[producer_limit % CHUNK_SIZE] == NULL) {
+        assert(q->producer_chunk->items[offset] == NULL);
+        q->producer_chunk->items[offset] = item;
+        q->producer_limit = producer_limit - 1;
+        q->producer_index++;
+    } else if (q->producer_chunk->items[(q->producer_index + 1) % CHUNK_SIZE] == NULL) { // buffer is not full
+        assert(q->producer_chunk->items[offset] == NULL);
+        q->producer_chunk->items[offset] = item;
+        q->producer_index++;
+    } else {
+        assert(q->producer_chunk->items[offset] == NULL);
+        q->producer_chunk->items[offset] = &q->jump;
+        // we got one slot left to write into, and we are not full. Need to link new buffer.
+        // allocate new buffer of same length
+        assert(q->producer_chunk->next == NULL);
+        qd_alloc_chunk_t *new_chunk = DEQ_TAIL(q->free_chunks);
+        if (new_chunk != NULL) {
+            DEQ_REMOVE_TAIL(q->free_chunks);
+            assert(new_chunk->prev == NULL);
+            assert(new_chunk->next == NULL);
+        } else {
+            new_chunk = NEW(qd_alloc_chunk_t);
+            ZERO(new_chunk);
         }
-        assert(top->prev == stack->top_chunk);
-        assert(stack->top_chunk->next == top);
-        stack->top_chunk = top;
-        stack->top = 0;
+        q->producer_chunk->next = new_chunk;
+        q->producer_chunk = new_chunk;
+        q->producer_limit = q->producer_index + CHUNK_SIZE - 2;
+        assert(q->producer_limit > q->producer_index);
+        assert(q->producer_chunk->items[offset] == NULL);
+        q->producer_chunk->items[offset] = item;
+        q->producer_index++;
     }
-    stack->size++;
-    stack->top_chunk->items[stack->top] = item;
-    stack->top++;
+}
+
+static inline void offer_q(qd_alloc_linked_queue_t *q, qd_alloc_item_t *item)
+{
+    assert(item != NULL);
+    const uint64_t offset = q->producer_index % CHUNK_SIZE;
+    if (q->producer_index < q->producer_limit) {
+        assert(q->producer_chunk->items[offset] == NULL);
+        q->producer_chunk->items[offset] = item;
+        q->producer_index++;
+    } else {
+        offer_q_slow_path(q, offset, item);
+    }
 }
 
 struct qd_alloc_pool_t {
     DEQ_LINKS(qd_alloc_pool_t);
-    qd_alloc_linked_stack_t free_list;
+    qd_alloc_linked_queue_t free_list;
 };
 
 qd_alloc_config_t qd_alloc_default_config_big   = {16,  32, 0};
@@ -167,7 +222,7 @@ static void qd_alloc_init(qd_alloc_type_desc_t *desc)
 
         desc->global_pool = NEW(qd_alloc_pool_t);
         DEQ_ITEM_INIT(desc->global_pool);
-        init_stack(&desc->global_pool->free_list);
+        init_q(&desc->global_pool->free_list);
         desc->lock = sys_mutex();
         DEQ_INIT(desc->tpool_list);
 #if QD_MEMORY_STATS
@@ -207,7 +262,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
     if (*tpool == 0) {
         NEW_CACHE_ALIGNED(qd_alloc_pool_t, *tpool);
         DEQ_ITEM_INIT(*tpool);
-        init_stack(&(*tpool)->free_list);
+        init_q(&(*tpool)->free_list);
         sys_mutex_lock(desc->lock);
         DEQ_INSERT_TAIL(desc->tpool_list, *tpool);
         sys_mutex_unlock(desc->lock);
@@ -220,7 +275,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
     // list and return it.  Since everything we've touched is thread-local,
     // there is no need to acquire a lock.
     //
-    qd_alloc_item_t *item = pop_stack(&pool->free_list);
+    qd_alloc_item_t *item = poll_q(&pool->free_list);
     if (item) {
 #ifdef QD_MEMORY_DEBUG
         item->desc   = desc;
@@ -236,7 +291,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
     // of items from the global list or go to the heap to get new memory.
     //
     sys_mutex_lock(desc->lock);
-    if (DEQ_SIZE(desc->global_pool->free_list) >= desc->config->transfer_batch_size) {
+    if (size_q(&desc->global_pool->free_list) >= desc->config->transfer_batch_size) {
         //
         // Rebalance a full batch from the global free list to the thread list.
         //
@@ -248,8 +303,8 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
             //TODO(franz):  this batch transfer could be improved
             //              in several ways: both transferring chunks or
             //              by using memcpy on items
-            item = pop_stack(&desc->global_pool->free_list);
-            push_stack(&pool->free_list, item);
+            item = poll_q(&desc->global_pool->free_list);
+            offer_q(&pool->free_list, item);
         }
     } else {
         //
@@ -268,7 +323,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
             ALLOC_CACHE_ALIGNED(size, item);
             if (item == 0)
                 break;
-            push_stack(&pool->free_list, item);
+            offer_q(&pool->free_list, item);
             item->sequence = 0;
 #if QD_MEMORY_STATS
             desc->stats->held_by_threads++;
@@ -278,7 +333,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
     }
     sys_mutex_unlock(desc->lock);
 
-    item = pop_stack(&pool->free_list);
+    item = poll_q(&pool->free_list);
     if (item) {
 #ifdef QD_MEMORY_DEBUG
         item->desc = desc;
@@ -317,7 +372,7 @@ void qd_dealloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool, char *p)
     if (*tpool == 0) {
         *tpool = NEW(qd_alloc_pool_t);
         DEQ_ITEM_INIT(*tpool);
-        init_stack(&(*tpool)->free_list);
+        init_q(&(*tpool)->free_list);
         sys_mutex_lock(desc->lock);
         DEQ_INSERT_TAIL(desc->tpool_list, *tpool);
         sys_mutex_unlock(desc->lock);
@@ -326,9 +381,9 @@ void qd_dealloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool, char *p)
     qd_alloc_pool_t *pool = *tpool;
 
     item->sequence++;
-    push_stack(&pool->free_list, item);
+    offer_q(&pool->free_list, item);
 
-    if (DEQ_SIZE(pool->free_list) < desc->config->local_free_list_max)
+    if (size_q(&pool->free_list) < desc->config->local_free_list_max)
         return;
 
     //
@@ -341,8 +396,8 @@ void qd_dealloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool, char *p)
     desc->stats->held_by_threads -= desc->config->transfer_batch_size;
 #endif
     for (idx = 0; idx < desc->config->transfer_batch_size; idx++) {
-        item = pop_stack(&pool->free_list);
-        push_stack(&desc->global_pool->free_list, item);
+        item = poll_q(&pool->free_list);
+        offer_q(&desc->global_pool->free_list, item);
     }
 
     //
@@ -350,8 +405,8 @@ void qd_dealloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool, char *p)
     // not exceeded.
     //
     if (desc->config->global_free_list_max != 0) {
-        while (DEQ_SIZE(desc->global_pool->free_list) > desc->config->global_free_list_max) {
-            item = pop_stack(&desc->global_pool->free_list);
+        while (size_q(&desc->global_pool->free_list) > desc->config->global_free_list_max) {
+            item = poll_q(&desc->global_pool->free_list);
             free(item);
 #if QD_MEMORY_STATS
             desc->stats->total_free_to_heap++;
@@ -412,15 +467,15 @@ void qd_alloc_finalize(void)
         //
         // Reclaim the items on the global free pool
         //
-        item = pop_stack(&desc->global_pool->free_list);
+        item = poll_q(&desc->global_pool->free_list);
         while (item) {
             free(item);
 #if QD_MEMORY_STATS
             desc->stats->total_free_to_heap++;
 #endif
-            item = pop_stack(&desc->global_pool->free_list);
+            item = poll_q(&desc->global_pool->free_list);
         }
-        free_stack_chunks(&desc->global_pool->free_list);
+        free_q_chunks(&desc->global_pool->free_list);
         free(desc->global_pool);
         desc->global_pool = 0;
 
@@ -429,16 +484,16 @@ void qd_alloc_finalize(void)
         //
         qd_alloc_pool_t *tpool = DEQ_HEAD(desc->tpool_list);
         while (tpool) {
-            item = pop_stack(&tpool->free_list);
+            item = poll_q(&tpool->free_list);
             while (item) {
                 free(item);
 #if QD_MEMORY_STATS
                 desc->stats->total_free_to_heap++;
 #endif
-                item = pop_stack(&tpool->free_list);
+                item = poll_q(&tpool->free_list);
             }
             DEQ_REMOVE_HEAD(desc->tpool_list);
-            free_stack_chunks(&tpool->free_list);
+            free_q_chunks(&tpool->free_list);
             free(tpool);
             tpool = DEQ_HEAD(desc->tpool_list);
         }
