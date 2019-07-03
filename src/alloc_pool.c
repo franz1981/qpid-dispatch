@@ -24,6 +24,7 @@
 #include <memory.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <qpid/dispatch/atomic.h>
 #include "entity.h"
 #include "entity_cache.h"
 #include "config.h"
@@ -47,6 +48,7 @@ DEQ_DECLARE(qd_alloc_type_t, qd_alloc_type_list_t);
 
 struct qd_alloc_item_t {
     uint32_t              sequence;
+    sys_atomic_t         *ref_count;
 #ifdef QD_MEMORY_DEBUG
     qd_alloc_type_desc_t *desc;
     uint32_t              header;
@@ -287,12 +289,53 @@ static void qd_alloc_init(qd_alloc_type_desc_t *desc)
     sys_mutex_unlock(init_lock);
 }
 
+//branchless align method: TODO(franz) it should goes in a proper util header
+inline static size_t align(const size_t value, const size_t pow_2_alignment)
+{
+    return (value + (pow_2_alignment - 1)) & ~(pow_2_alignment - 1);
+}
+
+//
+// Allocate a full batch from the heap and put it on the thread list.
+//
+static void alloc_batch_items(qd_alloc_type_desc_t *restrict desc, qd_alloc_pool_t *restrict pool)
+{
+    //the item_size need to be aligned to size of qd_alloc_item_t.sequence ie uint32_t
+    //to allow any item of the batch to be correctly aligned
+    const size_t item_size = align(sizeof(qd_alloc_item_t) + desc->total_size
+#ifdef QD_MEMORY_DEBUG
+                             + sizeof(uint32_t)
+#endif
+    ,sizeof(uint32_t));
+    const size_t sys_atomic_t_size = sizeof(sys_atomic_t);
+    const size_t batch_size = sys_atomic_t_size + (desc->config->transfer_batch_size * item_size);
+    void *items;
+    ALLOC_CACHE_ALIGNED(batch_size, items);
+    if (items != 0) {
+        sys_atomic_t *batch_ref_count = (sys_atomic_t *) items;
+        //pointer next to the last item
+        uint8_t *item = (((uint8_t *) &batch_ref_count[1]) + (desc->config->transfer_batch_size * item_size));
+        //insert on the stack in reverse order to allow a sequence of qd_alloc
+        //to stride sequentially the qd_alloc_item_t[]
+        for (int i = 0; i < desc->config->transfer_batch_size; i++) {
+            item -= item_size;
+            qd_alloc_item_t *alloc_item = (qd_alloc_item_t *) item;
+            push_stack(&pool->free_list, alloc_item);
+            alloc_item->sequence = 0;
+            alloc_item->ref_count = batch_ref_count;
+#if QD_MEMORY_STATS
+            desc->stats->held_by_threads++;
+            desc->stats->total_alloc_from_heap++;
+#endif
+        }
+        sys_atomic_init(batch_ref_count, desc->config->transfer_batch_size);
+    }
+}
+
 
 /* coverity[+alloc] */
 void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
 {
-    int idx;
-
     //
     // If the descriptor is not initialized, set it up now.
     //
@@ -345,29 +388,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
 #endif
         unordered_move_stack(&desc->global_pool->free_list, &pool->free_list, desc->config->transfer_batch_size);
     } else {
-        //
-        // Allocate a full batch from the heap and put it on the thread list.
-        //
-        qd_alloc_item_t* items[desc->config->transfer_batch_size];
-        for (idx = 0; idx < desc->config->transfer_batch_size; idx++) {
-            size_t size = sizeof(qd_alloc_item_t) + desc->total_size
-#ifdef QD_MEMORY_DEBUG
-                                                  + sizeof(uint32_t)
-#endif
-                ;
-            ALLOC_CACHE_ALIGNED(size, item);
-            if (item == 0)
-                break;
-            items[idx] = item;
-            item->sequence = 0;
-#if QD_MEMORY_STATS
-            desc->stats->held_by_threads++;
-            desc->stats->total_alloc_from_heap++;
-#endif
-        }
-        for (int i = idx - 1; i >= 0; i--) {
-            push_stack(&pool->free_list, items[i]);
-        }
+        alloc_batch_items(desc, pool);
     }
     sys_mutex_unlock(desc->lock);
 
@@ -385,6 +406,22 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
     return 0;
 }
 
+static void free_batch_items(qd_alloc_type_desc_t *restrict desc, const uint64_t count)
+{
+    for (uint64_t i = 0; i < count; i++) {
+        qd_alloc_item_t *item = pop_stack(&desc->global_pool->free_list);
+        if (item == NULL) {
+            return;
+        }
+        if (sys_atomic_dec(item->ref_count) == 1) {
+            //last one cleanup the batch
+            free((void *) item->ref_count);
+        }
+#if QD_MEMORY_STATS
+        desc->stats->total_free_to_heap++;
+#endif
+    }
+}
 
 /* coverity[+free : arg-2] */
 void qd_dealloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool, char *p)
@@ -439,12 +476,9 @@ void qd_dealloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool, char *p)
     // not exceeded.
     //
     if (desc->config->global_free_list_max != 0) {
-        while (DEQ_SIZE(desc->global_pool->free_list) > desc->config->global_free_list_max) {
-            item = pop_stack(&desc->global_pool->free_list);
-            free(item);
-#if QD_MEMORY_STATS
-            desc->stats->total_free_to_heap++;
-#endif
+        uint64_t to_free = ((long) DEQ_SIZE(desc->global_pool->free_list)) - desc->config->global_free_list_max;
+        if (to_free > 0) {
+            free_batch_items(desc, to_free);
         }
     }
 
@@ -503,7 +537,10 @@ void qd_alloc_finalize(void)
         //
         item = pop_stack(&desc->global_pool->free_list);
         while (item) {
-            free(item);
+            if (sys_atomic_dec(item->ref_count) == 1) {
+                //last one cleanup the batch
+                free((void *) item->ref_count);
+            }
 #if QD_MEMORY_STATS
             desc->stats->total_free_to_heap++;
 #endif
@@ -520,7 +557,10 @@ void qd_alloc_finalize(void)
         while (tpool) {
             item = pop_stack(&tpool->free_list);
             while (item) {
-                free(item);
+                if (sys_atomic_dec(item->ref_count) == 1) {
+                    //last one cleanup the batch
+                    free((void *) item->ref_count);
+                }
 #if QD_MEMORY_STATS
                 desc->stats->total_free_to_heap++;
 #endif
