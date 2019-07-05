@@ -115,6 +115,81 @@ unsigned char *qd_buffer_at(qd_buffer_t *buf, size_t len)
     return ((unsigned char*) &buf[1]) + len;
 }
 
+void qd_buffer_lists_clone(qd_buffer_list_t *restrict *restrict dst, qd_buffer_list_t *restrict *const restrict src,
+                           int count)
+{
+    qd_buffer_t *restrict buf[count];
+    for (int i = 0; i < count; i++) {
+        DEQ_INIT(*dst[i]);
+        buf[i] = DEQ_HEAD(*src[i]);
+    }
+    while (1) {
+        size_t to_copy[count];
+        qd_buffer_t *restrict next[count];
+        unsigned char *restrict src_buf[count];
+        int to_process = 0;
+        for (int i = 0; i < count; i++) {
+            if (buf[i] != NULL) {
+                to_copy[i] = qd_buffer_size(buf[i]);
+                src_buf[i] = qd_buffer_base(buf[i]);
+                next[i] = DEQ_NEXT(buf[i]);
+                to_process++;
+            } else {
+                to_copy[i] = 0;
+                src_buf[i] = NULL;
+                next[i] = NULL;
+            }
+        }
+        if (to_process == 0) {
+            return;
+        }
+        while (1) {
+            qd_buffer_t *restrict new_buf[count];
+            size_t capacity[count];
+            for (int i = 0; i < count; i++) {
+                if (to_copy[i] > 0) {
+                    new_buf[i] = qd_buffer();
+                } else {
+                    new_buf[i] = NULL;
+                }
+            }
+            long total_to_copy = 0;
+            for (int i = 0; i < count; i++) {
+                if (new_buf[i] != NULL) {
+                    size_t cap = qd_buffer_capacity(new_buf[i]);
+                    if (cap > to_copy[i]) {
+                        cap = to_copy[i];
+                    }
+                    capacity[i] = cap;
+                    memcpy(qd_buffer_cursor(new_buf[i]), src_buf[i], capacity[i]);
+                }
+            }
+            for (int i = 0; i < count; i++) {
+                if (new_buf[i] != NULL) {
+                    qd_buffer_insert(new_buf[i], capacity[i]);
+                    DEQ_INSERT_TAIL(*dst[i], new_buf[i]);
+                    src_buf[i] += capacity[i];
+                    to_copy[i] -= capacity[i];
+                    total_to_copy += to_copy[i];
+                }
+            }
+            if (total_to_copy == 0) {
+                break;
+            }
+        }
+        to_process = 0;
+        for (int i = 0; i < count; i++) {
+            buf[i] = next[i];
+            if (buf[i] != NULL) {
+                to_process++;
+            }
+        }
+        if (to_process == 0) {
+            return;
+        }
+    }
+}
+
 unsigned int qd_buffer_list_clone(qd_buffer_list_t *dst, const qd_buffer_list_t *src)
 {
     uint32_t len = 0;

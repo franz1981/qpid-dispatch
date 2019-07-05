@@ -997,9 +997,10 @@ qd_message_t *qd_message_copy(qd_message_t *in_msg)
         return 0;
 
     DEQ_ITEM_INIT(copy);
-    qd_buffer_list_clone(&copy->ma_to_override, &msg->ma_to_override);
-    qd_buffer_list_clone(&copy->ma_trace, &msg->ma_trace);
-    qd_buffer_list_clone(&copy->ma_ingress, &msg->ma_ingress);
+    qd_buffer_list_t *dst[] = {&copy->ma_to_override, &copy->ma_trace, &copy->ma_ingress};
+    qd_buffer_list_t *src[] = {&msg->ma_to_override, &msg->ma_trace, &msg->ma_ingress};
+    qd_buffer_lists_clone(dst, src, 3);
+
     copy->ma_phase = msg->ma_phase;
     copy->strip_annotations_in  = msg->strip_annotations_in;
 

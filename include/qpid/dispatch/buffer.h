@@ -97,6 +97,16 @@ size_t qd_buffer_size(qd_buffer_t *buf);
 void qd_buffer_insert(qd_buffer_t *buf, size_t len);
 
 /**
+ * Create new buffer lists by cloning the existing ones.
+ *
+ * @param dst A pointer to an array of buffer list to contain the new buffers
+ * @param src A pointer to an existing array of buffer list
+ * @count the size of the src and dst arrays
+ *
+ */
+void qd_buffer_lists_clone(qd_buffer_list_t *restrict*restrict dst, qd_buffer_list_t * restrict* const restrict src, int count);
+
+/**
  * Create a new buffer list by cloning an existing one.
  *
  * @param dst A pointer to a list to contain the new buffers
