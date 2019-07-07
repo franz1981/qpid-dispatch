@@ -70,17 +70,16 @@ static void qdr_activate_connections_CT(qdr_core_t *core)
 
 static void qdr_do_message_to_addr_free(qdr_core_t *core, qdr_general_work_t *work)
 {
-    qdr_delivery_cleanup_t *cleanup = DEQ_HEAD(work->delivery_cleanup_list);
+    qdr_delivery_cleanup_t *cleanup = NULL;
 
-    while (cleanup) {
-        DEQ_REMOVE_HEAD(work->delivery_cleanup_list);
+    while ((cleanup = qdr_poll_cleanup(&work->delivery_cleanup_list))) {
         if (cleanup->msg)
             qd_message_free(cleanup->msg);
         if (cleanup->iter)
             qd_iterator_free(cleanup->iter);
-        free_qdr_delivery_cleanup_t(cleanup);
-        cleanup = DEQ_HEAD(work->delivery_cleanup_list);
     }
+    assert(work->delivery_cleanup_list.consumer_buffer == NULL);
+    assert(work->delivery_cleanup_list.producer_buffer == NULL);
 }
 
 
@@ -173,9 +172,9 @@ void *router_core_thread(void *arg)
         //
         // Schedule the cleanup of deliveries freed during this core-thread pass
         //
-        if (DEQ_SIZE(core->delivery_cleanup_list) > 0) {
+        if (qdr_size_cleanup(&core->delivery_cleanup_list) > 0) {
             qdr_general_work_t *work = qdr_general_work(qdr_do_message_to_addr_free);
-            DEQ_MOVE(core->delivery_cleanup_list, work->delivery_cleanup_list);
+            qdr_move_cleanup_list(&core->delivery_cleanup_list, &work->delivery_cleanup_list);
             qdr_post_general_work_CT(core, work);
         }
     }

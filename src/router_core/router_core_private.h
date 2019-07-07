@@ -207,15 +207,110 @@ DEQ_DECLARE(qdr_action_t, qdr_action_list_t);
 //
 //
 typedef struct qdr_delivery_cleanup_t qdr_delivery_cleanup_t;
+typedef struct qdr_delivery_cleanups_t qdr_delivery_cleanups_t;
+typedef struct qdr_delivery_cleanup_list_t qdr_delivery_cleanup_list_t;
 
 struct qdr_delivery_cleanup_t {
-    DEQ_LINKS(qdr_delivery_cleanup_t);
     qd_message_t  *msg;
     qd_iterator_t *iter;
 };
 
-ALLOC_DECLARE(qdr_delivery_cleanup_t);
-DEQ_DECLARE(qdr_delivery_cleanup_t, qdr_delivery_cleanup_list_t);
+//WARNING: CLEANUP_CAPACITY has to be a power of 2 to make the compiler able to optimize % with & (CLEANUP_CAPACITY - 1) and / with a shift
+#define CLEANUP_CAPACITY 128/sizeof(qdr_delivery_cleanup_t)
+
+struct qdr_delivery_cleanups_t {
+    //although the ordering is suboptimal for 64 bit archs, id is always the first field to be read
+    //and need to be on top of this struct
+    size_t                   id;
+    qdr_delivery_cleanup_t   cleanup[CLEANUP_CAPACITY];
+    qdr_delivery_cleanups_t* next;
+};
+
+ALLOC_DECLARE(qdr_delivery_cleanups_t);
+
+//This list has been optimized for simple access patterns: mostly
+//a batch of offers, a move and polls until empty.
+//It is not suitable to be reused many times, because it tends
+//to not reuse a chunk even if it has space available
+struct qdr_delivery_cleanup_list_t {
+    qdr_delivery_cleanups_t *producer_buffer;
+    qdr_delivery_cleanups_t *consumer_buffer;
+    size_t                   producer_position;
+    size_t                   consumer_position;
+};
+
+static inline void qdr_init_cleanup(qdr_delivery_cleanup_list_t *list)
+{
+    list->consumer_buffer = NULL;
+    list->producer_buffer = NULL;
+    list->producer_position = 0;
+    list->consumer_position = 0;
+}
+
+static inline size_t qdr_size_cleanup(qdr_delivery_cleanup_list_t *list)
+{
+    return list->producer_position - list->consumer_position;
+}
+
+static inline qdr_delivery_cleanup_t *qdr_offer_cleanup(qdr_delivery_cleanup_list_t *list)
+{
+    const size_t capacity = CLEANUP_CAPACITY;
+    size_t id;
+    if (list->producer_buffer == NULL) {
+        assert(list->consumer_buffer == NULL);
+        list->producer_buffer = new_qdr_delivery_cleanups_t();
+        list->producer_buffer->next = NULL;
+        id = list->producer_position / capacity;
+        list->producer_buffer->id = id;
+        list->consumer_buffer = list->producer_buffer;
+    } else if (list->producer_buffer->id != (id = list->producer_position / capacity)) {
+        assert(list->producer_buffer->id == (id - 1));
+        //need to allocate a new chunk
+        qdr_delivery_cleanups_t *next = new_qdr_delivery_cleanups_t();
+        next->next = NULL;
+        next->id = id;
+        list->producer_buffer->next = next;
+        list->producer_buffer = next;
+    }
+    size_t index = list->producer_position % capacity;
+    list->producer_position++;
+    return &list->producer_buffer->cleanup[index];
+}
+
+static inline qdr_delivery_cleanup_t *qdr_poll_cleanup(qdr_delivery_cleanup_list_t *list)
+{
+    const size_t capacity = CLEANUP_CAPACITY;
+    if (list->consumer_buffer == NULL) {
+        return NULL;
+    } else if (list->consumer_position == list->producer_position) {
+        //given that the producer could allocate a new chunk with the correct id
+        //we can get rid of the consumer/producer_buffer, making it available to others that need it
+        if (list->consumer_buffer != NULL) {
+            assert(list->consumer_buffer == list->producer_buffer);
+            free_qdr_delivery_cleanups_t(list->consumer_buffer);
+            list->consumer_buffer = NULL;
+            list->producer_buffer = NULL;
+        }
+        return NULL;
+    } else if (list->consumer_buffer->id != (list->consumer_position / capacity)) {
+        if (list->consumer_buffer->next == NULL) {
+            return NULL;
+        }
+        qdr_delivery_cleanups_t *next = list->consumer_buffer->next;
+        free_qdr_delivery_cleanups_t(list->consumer_buffer);
+        list->consumer_buffer = next;
+    }
+    size_t index = list->consumer_position % capacity;
+    list->consumer_position++;
+    return &list->consumer_buffer->cleanup[index];
+}
+
+static inline void qdr_move_cleanup_list(qdr_delivery_cleanup_list_t *from, qdr_delivery_cleanup_list_t *to)
+{
+    *to = *from;
+    ZERO(from);
+}
+
 
 //
 // General Work
