@@ -898,8 +898,8 @@ void qdr_post_general_work_CT(qdr_core_t *core, qdr_general_work_t *work)
     spmc_fs_rb_commit_claim(&core->work_list, claimed_pos);
     //need full barrier because the ring buffer is not using any HW barrier
     atomic_thread_fence(memory_order_seq_cst);
-    //wake up if there is some worker idle
-    if (atomic_load_explicit(&core->workers.status.active_workers, memory_order_acquire) < core->qd->thread_count) {
+    //wake up if there are no workers awake
+    if (atomic_load_explicit(&core->workers.status.active_workers, memory_order_acquire) == 0) {
         qd_timer_schedule(core->work_timer, 0);
     }
 }
