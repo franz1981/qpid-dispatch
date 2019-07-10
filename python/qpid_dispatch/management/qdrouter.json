@@ -1749,6 +1749,8 @@
                 "localFreeListMax": {"type": "integer", "graph": true},
                 "globalFreeListMax": {"type": "integer", "graph": true},
                 "totalAllocFromHeap": {"type": "integer", "graph": true},
+                "localChunks": {"type": "integer", "graph": true},
+                "globalChunks": {"type": "integer", "graph": true},
                 "totalFreeToHeap": {"type": "integer", "graph": true},
                 "heldByThreads": {"type": "integer", "graph": true},
                 "batchesRebalancedToThreads": {"type": "integer", "graph": true},

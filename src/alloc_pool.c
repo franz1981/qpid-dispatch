@@ -124,12 +124,20 @@ static inline void free_stack_chunks(qd_alloc_linked_stack_t *stack)
     }
 }
 
-static inline void next_chunk_stack(qd_alloc_linked_stack_t *const stack)
+static inline void next_chunk_stack(qd_alloc_linked_stack_t *const stack, qd_alloc_type_desc_t* desc, bool global)
 {
     assert(stack->top == CHUNK_SIZE);
     qd_alloc_chunk_t *top = stack->top_chunk->next;
     if (top == NULL) {
+#if QD_MEMORY_STATS
+        if (global) {
+            desc->stats->global_alloc_chunks++;
+        } else {
+            sys_atomic_inc(&desc->stats->local_alloc_chunks);
+        }
+#endif
         top = NEW(qd_alloc_chunk_t);
+        assert(top != NULL);
         stack->top_chunk->next = top;
         top->prev = stack->top_chunk;
         top->next = NULL;
@@ -140,17 +148,17 @@ static inline void next_chunk_stack(qd_alloc_linked_stack_t *const stack)
     stack->top = 0;
 }
 
-static inline void push_stack(qd_alloc_linked_stack_t *stack, qd_alloc_item_t *item)
+static inline void push_stack(qd_alloc_linked_stack_t *stack, qd_alloc_item_t *item, qd_alloc_type_desc_t* desc, bool global)
 {
     if (stack->top == CHUNK_SIZE) {
-        next_chunk_stack(stack);
+        next_chunk_stack(stack, desc, global);
     }
     stack->size++;
     stack->top_chunk->items[stack->top] = item;
     stack->top++;
 }
 
-static inline int unordered_move_stack(qd_alloc_linked_stack_t *from, qd_alloc_linked_stack_t *to, uint32_t length)
+static inline int unordered_move_stack(qd_alloc_linked_stack_t *from, qd_alloc_linked_stack_t *to, uint32_t length, qd_alloc_type_desc_t* desc, bool global)
 {
     length = from->size < length ? from->size : length;
     if (length == 0) {
@@ -165,7 +173,7 @@ static inline int unordered_move_stack(qd_alloc_linked_stack_t *from, qd_alloc_l
         }
         to_copy = from->top < to_copy ? from->top : to_copy;
         if (to->top == CHUNK_SIZE) {
-            next_chunk_stack(to);
+            next_chunk_stack(to, desc, global);
         }
         uint32_t remaining_to = CHUNK_SIZE - to->top;
         to_copy = remaining_to < to_copy ? remaining_to : to_copy;
@@ -286,7 +294,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
         desc->stats->batches_rebalanced_to_threads++;
         desc->stats->held_by_threads += desc->config->transfer_batch_size;
 #endif
-        unordered_move_stack(&desc->global_pool->free_list, &pool->free_list, desc->config->transfer_batch_size);
+        unordered_move_stack(&desc->global_pool->free_list, &pool->free_list, desc->config->transfer_batch_size, desc, false);
     } else {
         //
         // Allocate a full batch from the heap and put it on the thread list.
@@ -304,7 +312,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
             ALLOC_CACHE_ALIGNED(size, item);
             if (item == 0)
                 break;
-            push_stack(&pool->free_list, item);
+            push_stack(&pool->free_list, item, desc, false);
             item->sequence = 0;
 #if QD_MEMORY_STATS
             desc->stats->held_by_threads++;
@@ -361,7 +369,7 @@ void qd_dealloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool, char *p)
     qd_alloc_pool_t *pool = *tpool;
 
     item->sequence++;
-    push_stack(&pool->free_list, item);
+    push_stack(&pool->free_list, item, desc, false);
 
     if (DEQ_SIZE(pool->free_list) < desc->config->local_free_list_max)
         return;
@@ -375,7 +383,7 @@ void qd_dealloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool, char *p)
     desc->stats->batches_rebalanced_to_global++;
     desc->stats->held_by_threads -= desc->config->transfer_batch_size;
 #endif
-    unordered_move_stack(&pool->free_list, &desc->global_pool->free_list, desc->config->transfer_batch_size);
+    unordered_move_stack(&pool->free_list, &desc->global_pool->free_list, desc->config->transfer_batch_size, desc, true);
 
     //
     // If there's a global_free_list size limit, remove items until the limit is
@@ -515,6 +523,8 @@ qd_error_t qd_entity_refresh_allocator(qd_entity_t* entity, void *impl) {
         qd_entity_set_long(entity, "globalFreeListMax", alloc_type->desc->config->global_free_list_max) == 0
 #if QD_MEMORY_STATS
         && qd_entity_set_long(entity, "totalAllocFromHeap", alloc_type->desc->stats->total_alloc_from_heap) == 0 &&
+        qd_entity_set_long(entity, "localChunks", sys_atomic_get(&alloc_type->desc->stats->local_alloc_chunks)) == 0 &&
+        qd_entity_set_long(entity, "globalChunks", alloc_type->desc->stats->global_alloc_chunks) == 0 &&
         qd_entity_set_long(entity, "totalFreeToHeap", alloc_type->desc->stats->total_free_to_heap) == 0 &&
         qd_entity_set_long(entity, "heldByThreads", alloc_type->desc->stats->held_by_threads) == 0 &&
         qd_entity_set_long(entity, "batchesRebalancedToThreads", alloc_type->desc->stats->batches_rebalanced_to_threads) == 0 &&

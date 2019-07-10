@@ -621,12 +621,14 @@ class BusManager(Node):
         heads.append(Header("batch"))
         heads.append(Header("thread-max", Header.COMMAS))
         heads.append(Header("total", Header.COMMAS))
+        heads.append(Header("local-chunks", Header.COMMAS))
+        heads.append(Header("global-chunks", Header.COMMAS))
         heads.append(Header("in-threads", Header.COMMAS))
         heads.append(Header("rebal-in", Header.COMMAS))
         heads.append(Header("rebal-out", Header.COMMAS))
         rows = []
         cols = ('identity', 'typeSize', 'transferBatchSize', 'localFreeListMax',
-                'totalAllocFromHeap', 'heldByThreads', 'batchesRebalancedToThreads',
+                'totalAllocFromHeap', 'localChunks', 'globalChunks', 'heldByThreads', 'batchesRebalancedToThreads',
                 'batchesRebalancedToGlobal')
 
         objects = self.query('org.apache.qpid.dispatch.allocator', cols)
@@ -638,6 +640,8 @@ class BusManager(Node):
             row.append(t.transferBatchSize)
             row.append(t.localFreeListMax)
             row.append(t.totalAllocFromHeap)
+            row.append(t.localChunks)
+            row.append(t.globalChunks)
             row.append(t.heldByThreads)
             row.append(t.batchesRebalancedToThreads)
             row.append(t.batchesRebalancedToGlobal)

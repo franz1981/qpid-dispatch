@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <qpid/dispatch/threading.h>
 #include <qpid/dispatch/ctools.h>
+#include "atomic.h"
 
 /**
  * @file
@@ -47,7 +48,9 @@ typedef struct {
 
 /** Allocation statistics. */
 typedef struct {
+    sys_atomic_t local_alloc_chunks;
     uint64_t total_alloc_from_heap;
+    uint64_t global_alloc_chunks;
     uint64_t total_free_to_heap;
     uint64_t held_by_threads;
     uint64_t batches_rebalanced_to_threads;
