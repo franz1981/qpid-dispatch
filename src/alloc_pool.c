@@ -82,6 +82,7 @@ static inline void init_stack(qd_alloc_linked_stack_t *stack)
 
 static inline void prev_chunk_stack(qd_alloc_linked_stack_t *const stack)
 {
+    const uint32_t chunk_size = CHUNK_SIZE;
     assert(stack->top == 0);
     assert(stack->size != 0);
     assert(stack->top_chunk != &stack->base_chunk);
@@ -91,7 +92,7 @@ static inline void prev_chunk_stack(qd_alloc_linked_stack_t *const stack)
     //              Just need to pay attention to null out released_chunk->prev->next
     //              to make it unreachable from the stack
     stack->top_chunk = prev;
-    stack->top = CHUNK_SIZE;
+    stack->top = chunk_size;
 }
 
 static inline qd_alloc_item_t *pop_stack(qd_alloc_linked_stack_t *const stack)
@@ -150,7 +151,8 @@ static inline void next_chunk_stack(qd_alloc_linked_stack_t *const stack, qd_all
 
 static inline void push_stack(qd_alloc_linked_stack_t *stack, qd_alloc_item_t *item, qd_alloc_type_desc_t* desc, bool global)
 {
-    if (stack->top == CHUNK_SIZE) {
+    const uint32_t chunk_size = CHUNK_SIZE;
+    if (stack->top == chunk_size) {
         next_chunk_stack(stack, desc, global);
     }
     stack->size++;
@@ -160,6 +162,7 @@ static inline void push_stack(qd_alloc_linked_stack_t *stack, qd_alloc_item_t *i
 
 static inline int unordered_move_stack(qd_alloc_linked_stack_t *from, qd_alloc_linked_stack_t *to, uint32_t length, qd_alloc_type_desc_t* desc, bool global)
 {
+    const uint32_t chunk_size = CHUNK_SIZE;
     length = from->size < length ? from->size : length;
     if (length == 0) {
         return 0;
@@ -172,10 +175,10 @@ static inline int unordered_move_stack(qd_alloc_linked_stack_t *from, qd_alloc_l
             prev_chunk_stack(from);
         }
         to_copy = from->top < to_copy ? from->top : to_copy;
-        if (to->top == CHUNK_SIZE) {
+        if (to->top == chunk_size) {
             next_chunk_stack(to, desc, global);
         }
-        uint32_t remaining_to = CHUNK_SIZE - to->top;
+        uint32_t remaining_to = chunk_size - to->top;
         to_copy = remaining_to < to_copy ? remaining_to : to_copy;
         from->top -= to_copy;
         memcpy(&to->top_chunk->items[to->top], &from->top_chunk->items[from->top], to_copy * sizeof(qd_alloc_item_t *));
