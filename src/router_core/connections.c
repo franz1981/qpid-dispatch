@@ -635,7 +635,6 @@ void qdr_connection_enqueue_work_CT(qdr_core_t            *core,
         qdr_connection_activate_CT(core, conn);
 }
 
-
 void qdr_link_enqueue_work_CT(qdr_core_t      *core,
                               qdr_link_t      *link,
                               qdr_link_work_t *work)
@@ -647,6 +646,20 @@ void qdr_link_enqueue_work_CT(qdr_core_t      *core,
     // Enqueue work at priority 0.
     qdr_add_link_ref(conn->links_with_work, link, QDR_LINK_LIST_CLASS_WORK);
     sys_mutex_unlock(conn->work_lock);
+
+    qdr_connection_activate_CT(core, conn);
+}
+
+
+void qdr_link_locked_enqueue_work_CT(qdr_core_t      *core,
+                              qdr_link_t      *link,
+                              qdr_link_work_t *work)
+{
+    qdr_connection_t *conn = link->conn;
+
+    DEQ_INSERT_TAIL(link->work_list, work);
+    // Enqueue work at priority 0.
+    qdr_add_link_ref(conn->links_with_work, link, QDR_LINK_LIST_CLASS_WORK);
 
     qdr_connection_activate_CT(core, conn);
 }

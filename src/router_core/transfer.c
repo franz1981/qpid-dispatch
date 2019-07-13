@@ -799,8 +799,6 @@ void qdr_link_issue_credit_CT(qdr_core_t *core, qdr_link_t *link, int credit, bo
         qdr_connection_activate_CT(core, conn);
 
     } else {
-        sys_mutex_unlock(conn->work_lock);
-
         // need a new work flow item
         work = new_qdr_link_work_t();
         ZERO(work);
@@ -808,7 +806,8 @@ void qdr_link_issue_credit_CT(qdr_core_t *core, qdr_link_t *link, int credit, bo
         work->value     = credit;
         if (drain_changed)
             work->drain_action = drain_action;
-        qdr_link_enqueue_work_CT(core, link, work);
+        qdr_link_locked_enqueue_work_CT(core, link, work);
+        sys_mutex_unlock(conn->work_lock);
     }
 }
 

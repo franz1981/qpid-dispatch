@@ -928,6 +928,11 @@ void qdr_edge_connection_closed(qdr_edge_t *edge);
 void qdr_connection_enqueue_work_CT(qdr_core_t            *core,
                                     qdr_connection_t      *conn,
                                     qdr_connection_work_t *work);
+
+void qdr_link_locked_enqueue_work_CT(qdr_core_t      *core,
+                              qdr_link_t      *conn,
+                              qdr_link_work_t *work);
+
 void qdr_link_enqueue_work_CT(qdr_core_t      *core,
                               qdr_link_t      *conn,
                               qdr_link_work_t *work);
