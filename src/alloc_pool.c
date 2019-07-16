@@ -125,12 +125,15 @@ static inline void free_stack_chunks(qd_alloc_linked_stack_t *stack)
     }
 }
 
-static inline void next_chunk_stack(qd_alloc_linked_stack_t *const stack)
+static inline bool next_chunk_stack(qd_alloc_linked_stack_t *const stack)
 {
     assert(stack->top == CHUNK_SIZE);
     qd_alloc_chunk_t *top = stack->top_chunk->next;
     if (top == NULL) {
         top = NEW(qd_alloc_chunk_t);
+        if (top == NULL) {
+            return false;
+        }
         stack->top_chunk->next = top;
         top->prev = stack->top_chunk;
         top->next = NULL;
@@ -139,17 +142,21 @@ static inline void next_chunk_stack(qd_alloc_linked_stack_t *const stack)
     assert(stack->top_chunk->next == top);
     stack->top_chunk = top;
     stack->top = 0;
+    return true;
 }
 
-static inline void push_stack(qd_alloc_linked_stack_t *stack, qd_alloc_item_t *item)
+static inline bool push_stack(qd_alloc_linked_stack_t *stack, qd_alloc_item_t *item)
 {
     const uint32_t chunk_size = CHUNK_SIZE;
     if (stack->top == chunk_size) {
-        next_chunk_stack(stack);
+        if (!next_chunk_stack(stack)) {
+            return false;
+        }
     }
     stack->size++;
     stack->top_chunk->items[stack->top] = item;
     stack->top++;
+    return true;
 }
 
 static inline int unordered_move_stack(qd_alloc_linked_stack_t *from, qd_alloc_linked_stack_t *to, uint32_t length)
@@ -168,7 +175,9 @@ static inline int unordered_move_stack(qd_alloc_linked_stack_t *from, qd_alloc_l
         }
         to_copy = from->top < to_copy ? from->top : to_copy;
         if (to->top == chunk_size) {
-            next_chunk_stack(to);
+            if (!next_chunk_stack(to)) {
+                return length - remaining;
+            }
         }
         uint32_t remaining_to = chunk_size - to->top;
         to_copy = remaining_to < to_copy ? remaining_to : to_copy;
@@ -285,11 +294,13 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
         //
         // Rebalance a full batch from the global free list to the thread list.
         //
+        const int moved = unordered_move_stack(&desc->global_pool->free_list, &pool->free_list,
+                                               desc->config->transfer_batch_size);
+        assert(moved == desc->config->transfer_batch_size);
 #if QD_MEMORY_STATS
         desc->stats->batches_rebalanced_to_threads++;
-        desc->stats->held_by_threads += desc->config->transfer_batch_size;
+        desc->stats->held_by_threads += moved;
 #endif
-        unordered_move_stack(&desc->global_pool->free_list, &pool->free_list, desc->config->transfer_batch_size);
     } else {
         //
         // Allocate a full batch from the heap and put it on the thread list.
@@ -307,7 +318,10 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
             ALLOC_CACHE_ALIGNED(size, item);
             if (item == 0)
                 break;
-            push_stack(&pool->free_list, item);
+            if (!push_stack(&pool->free_list, item)) {
+                free(item);
+                break;
+            }
             item->sequence = 0;
 #if QD_MEMORY_STATS
             desc->stats->held_by_threads++;
@@ -364,7 +378,9 @@ void qd_dealloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool, char *p)
     qd_alloc_pool_t *pool = *tpool;
 
     item->sequence++;
-    push_stack(&pool->free_list, item);
+    if (!push_stack(&pool->free_list, item)) {
+        free(item);
+    }
 
     if (DEQ_SIZE(pool->free_list) < desc->config->local_free_list_max)
         return;
@@ -374,12 +390,13 @@ void qd_dealloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool, char *p)
     // rebalanced back to the global list.
     //
     sys_mutex_lock(desc->lock);
+    const int moved = unordered_move_stack(&pool->free_list, &desc->global_pool->free_list,
+                                           desc->config->transfer_batch_size);
+    assert(moved == desc->config->transfer_batch_size);
 #if QD_MEMORY_STATS
     desc->stats->batches_rebalanced_to_global++;
-    desc->stats->held_by_threads -= desc->config->transfer_batch_size;
+    desc->stats->held_by_threads -= moved;
 #endif
-    unordered_move_stack(&pool->free_list, &desc->global_pool->free_list, desc->config->transfer_batch_size);
-
     //
     // If there's a global_free_list size limit, remove items until the limit is
     // not exceeded.
