@@ -147,10 +147,62 @@ static inline void push_stack(qd_alloc_linked_stack_t *stack, qd_alloc_item_t *i
     if (stack->top == chunk_size) {
         next_chunk_stack(stack);
     }
-    stack->size++;
-    stack->top_chunk->items[stack->top] = item;
-    stack->top++;
+    if (stack->top > 0) {
+        qd_alloc_item_t **items = stack->top_chunk->items;
+        const uint64_t new_item_addr = (uint64_t) item;
+        //insertion sort: simple and effective for small arrays
+        for (int i = stack->top - 1; i >= 0; i--) {
+            const uint64_t item_addr = (uint64_t) items[i];
+            if (item_addr >= new_item_addr) {
+                //can put it on top of this
+                for (int j = stack->top - 1; j > i; j--) {
+                    items[j + 1] = items[j];
+                }
+                items[i+1] = item;
+                stack->size++;
+                stack->top++;
+                return;
+            }
+        }
+        for (int j = stack->top - 1; j >= 0; j--) {
+            items[j + 1] = items[j];
+        }
+        items[0] = item;
+        stack->size++;
+        stack->top++;
+        //need to shift the entire array content
+    } else {
+        stack->size++;
+        stack->top_chunk->items[stack->top] = item;
+        stack->top++;
+    }
 }
+
+#if !defined(NDEBUG)
+/* qsort int comparison function */
+static inline int pointer_cmp(const void *a, const void *b)
+{
+    const qd_alloc_item_t **ia = (const qd_alloc_item_t **) a; // casting pointer types
+    const qd_alloc_item_t **ib = (const qd_alloc_item_t **) b;
+    const int64_t addr_a = (int64_t)*ia;
+    const int64_t addr_b = (int64_t)*ib;
+    return addr_b - addr_a;
+    /* integer comparison: returns negative if a > b
+    and positive if b < a */
+}
+
+static bool is_ordered(qd_alloc_linked_stack_t *stack){
+    qd_alloc_item_t *items[stack->top];
+    size_t how_many = stack->top * sizeof(qd_alloc_item_t *);
+    memcpy(items, stack->top_chunk->items, how_many);
+    qsort(items, stack->top, sizeof(qd_alloc_item_t *), pointer_cmp);
+    if (strncmp((char *) stack->top_chunk->items, (char *) items, how_many) == 0) {
+        return true;
+    }
+    return false;
+}
+#endif
+
 
 static inline int unordered_move_stack(qd_alloc_linked_stack_t *from, qd_alloc_linked_stack_t *to, uint32_t length)
 {
@@ -168,6 +220,7 @@ static inline int unordered_move_stack(qd_alloc_linked_stack_t *from, qd_alloc_l
         }
         to_copy = from->top < to_copy ? from->top : to_copy;
         if (to->top == chunk_size) {
+            assert(is_ordered(to));
             next_chunk_stack(to);
         }
         uint32_t remaining_to = chunk_size - to->top;
@@ -179,6 +232,7 @@ static inline int unordered_move_stack(qd_alloc_linked_stack_t *from, qd_alloc_l
         from->size -= to_copy;
         remaining -= to_copy;
     }
+    assert(is_ordered(to));
     return length;
 }
 
@@ -294,10 +348,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
         //
         // Allocate a full batch from the heap and put it on the thread list.
         //
-        //TODO(franz):
-        //  -   would be better to allocate in batches == transfer_batch_size
-        //      and put a small (== sizeof(transfer_batch_size)) ref_count to help the final free
-        //  -   could be beneficial directly to delink a chunk?
+        qd_alloc_item_t* items[desc->config->transfer_batch_size];
         for (idx = 0; idx < desc->config->transfer_batch_size; idx++) {
             size_t size = sizeof(qd_alloc_item_t) + desc->total_size
 #ifdef QD_MEMORY_DEBUG
@@ -307,12 +358,15 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
             ALLOC_CACHE_ALIGNED(size, item);
             if (item == 0)
                 break;
-            push_stack(&pool->free_list, item);
+            items[idx] = item;
             item->sequence = 0;
 #if QD_MEMORY_STATS
             desc->stats->held_by_threads++;
             desc->stats->total_alloc_from_heap++;
 #endif
+        }
+        for (int i = idx - 1; i >= 0; i--) {
+            push_stack(&pool->free_list, items[i]);
         }
     }
     sys_mutex_unlock(desc->lock);
