@@ -123,6 +123,7 @@ void qdr_modules_finalize(qdr_core_t *core)
 void *router_core_thread(void *arg)
 {
     size_t             action_list_limit = 1024;
+    size_t             action_list_batch = 32;
     qdr_core_t        *core = (qdr_core_t*) arg;
     qdr_action_t       action_list[action_list_limit];
 
@@ -134,27 +135,45 @@ void *router_core_thread(void *arg)
 
     qd_log(core->log, QD_LOG_INFO, "Router Core thread running. %s/%s", core->router_area, core->router_id);
     while (core->running) {
-        //
-        // Use the lock only to protect the condition variable and the action list
-        //
-        sys_mutex_lock(core->action_lock);
+        size_t actions = 0;
+        size_t remaining = action_list_limit;
+        while (remaining > 0) {
+            //
+            // Use the lock only to protect the condition variable and the action list
+            //
+            sys_mutex_lock(core->action_lock);
 
-        //
-        // Block on the condition variable when there is no action to do
-        //
-        while (core->running && qdr_action_q_is_empty(&core->action_list)) {
-            core->sleeping = true;
-            sys_cond_wait(core->action_cond, core->action_lock);
-            core->sleeping = false;
+            //
+            // Block on the condition variable when there is no action to do
+            //
+            bool end_of_batch = false;
+            while (core->running && qdr_action_q_is_empty(&core->action_list)) {
+                if (actions > 0) {
+                    sys_mutex_unlock(core->action_lock);
+                    end_of_batch = true;
+                    break;
+                }
+                core->sleeping = true;
+                sys_cond_wait(core->action_cond, core->action_lock);
+                core->sleeping = false;
+                assert(actions == 0);
+            }
+            if (end_of_batch) {
+                break;
+            }
+            //
+            // Move the entire action list to a private list so we can process it without
+            // holding the lock
+            //
+            const size_t limit = remaining < action_list_batch ? remaining : action_list_batch;
+            const size_t new_actions = qdr_action_q_batch_poll(&core->action_list, action_list + actions, limit);
+            actions += new_actions;
+            remaining -= new_actions;
+            sys_mutex_unlock(core->action_lock);
+            if (new_actions == 0 && actions > 0) {
+                break;
+            }
         }
-
-        //
-        // Move the entire action list to a private list so we can process it without
-        // holding the lock
-        //
-
-        const size_t actions = qdr_action_q_batch_poll(&core->action_list, action_list, action_list_limit);
-        sys_mutex_unlock(core->action_lock);
 
         //
         // Process and free all of the action items in the list
