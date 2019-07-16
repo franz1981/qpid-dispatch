@@ -142,8 +142,11 @@ void *router_core_thread(void *arg)
         //
         // Block on the condition variable when there is no action to do
         //
-        while (core->running && qdr_action_q_is_empty(&core->action_list))
+        while (core->running && qdr_action_q_is_empty(&core->action_list)) {
+            core->sleeping = true;
             sys_cond_wait(core->action_cond, core->action_lock);
+            core->sleeping = false;
+        }
 
         //
         // Move the entire action list to a private list so we can process it without
