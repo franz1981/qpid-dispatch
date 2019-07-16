@@ -27,6 +27,9 @@
 #include "entity.h"
 #include "entity_cache.h"
 #include "config.h"
+#include <xmmintrin.h>
+
+#define PREFETCH_EXACT_T0(addr) _mm_prefetch(((char *)(addr)),_MM_HINT_T0)
 
 const char *QD_ALLOCATOR_TYPE = "allocator";
 
@@ -273,6 +276,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
         *((uint32_t*) ((char*) &item[1] + desc->total_size))= PATTERN_BACK;
         QD_MEMORY_FILL(&item[1], QD_MEMORY_INIT, desc->total_size);
 #endif
+        PREFETCH_EXACT_T0(&item[1]);
         return &item[1];
     }
 
@@ -325,6 +329,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
         *((uint32_t*) ((char*) &item[1] + desc->total_size))= PATTERN_BACK;
         QD_MEMORY_FILL(&item[1], QD_MEMORY_INIT, desc->total_size);
 #endif
+        PREFETCH_EXACT_T0(&item[1]);
         return &item[1];
     }
 
