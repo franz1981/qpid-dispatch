@@ -147,6 +147,7 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     //
     // Set up the threading support
     //
+    core->sleeping = false;
     core->action_cond = sys_cond();
     core->action_lock = sys_mutex();
     core->running     = true;
@@ -187,7 +188,11 @@ void qdr_core_free(qdr_core_t *core)
     // Stop and join the thread
     //
     core->running = false;
-    sys_cond_signal(core->action_cond);
+    sys_mutex_lock(core->action_lock);
+    if (core->sleeping) {
+        sys_cond_signal(core->action_cond);
+    }
+    sys_mutex_unlock(core->action_lock);
     sys_thread_join(core->thread);
 
     // Drain the general work lists
@@ -410,7 +415,9 @@ void qdr_action_enqueue(qdr_core_t *core, qdr_action_t *action)
 {
     sys_mutex_lock(core->action_lock);
     qdr_action_q_offer(&core->action_list, action);
-    sys_cond_signal(core->action_cond);
+    if (core->sleeping) {
+        sys_cond_signal(core->action_cond);
+    }
     sys_mutex_unlock(core->action_lock);
     free_qdr_action_t(action);
 }
