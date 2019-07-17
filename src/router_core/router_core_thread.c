@@ -124,7 +124,9 @@ void *router_core_thread(void *arg)
 {
     size_t             action_list_limit = 1024;
     qdr_core_t        *core = (qdr_core_t*) arg;
-    qdr_action_t       action_list[action_list_limit];
+    qdr_action_t      *action_list;
+
+    ALLOC_CACHE_ALIGNED(sizeof(qdr_action_t) * action_list_limit, action_list);
 
     qdr_forwarder_setup_CT(core);
     qdr_route_table_setup_CT(core);
@@ -181,7 +183,7 @@ void *router_core_thread(void *arg)
             qdr_post_general_work_CT(core, work);
         }
     }
-
+    free(action_list);
     qd_log(core->log, QD_LOG_INFO, "Router Core thread exited");
     return 0;
 }
