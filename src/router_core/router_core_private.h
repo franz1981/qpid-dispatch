@@ -231,6 +231,18 @@ struct qdr_delivery_cleanup_t {
     qd_iterator_t *iter;
 };
 
+typedef struct qdr_delivery_cleanup_array_t qdr_delivery_cleanup_array_t;
+
+struct qdr_delivery_cleanup_array_t {
+    qdr_delivery_cleanup_t  *buffer;
+    uint32_t                 count;
+    uint32_t                 capacity;
+};
+
+void qdr_delivery_cleanup_array_init(qdr_delivery_cleanup_array_t *cleanup, uint64_t capacity);
+
+qdr_delivery_cleanup_t *qdr_delivery_cleanup_array_add(qdr_delivery_cleanup_array_t *cleanup);
+
 ALLOC_DECLARE(qdr_delivery_cleanup_t);
 DEQ_DECLARE(qdr_delivery_cleanup_t, qdr_delivery_cleanup_list_t);
 
@@ -865,6 +877,8 @@ struct qdr_core_t {
     qdr_forwarder_t      *forwarders[QD_TREATMENT_LINK_BALANCED + 1];
 
     qdr_delivery_cleanup_list_t  delivery_cleanup_list;  ///< List of delivery cleanup items to be processed in an IO thread
+    qdr_delivery_cleanup_array_t local_delivery_cleanup_array;
+
 
     // Overall delivery counters
     uint64_t presettled_deliveries;

@@ -383,13 +383,19 @@ static void qdr_delete_delivery_internal_CT(qdr_core_t *core, qdr_delivery_t *de
     assert(sys_atomic_get(&delivery->ref_count) == 0);
 
     if (delivery->msg || delivery->to_addr) {
-        qdr_delivery_cleanup_t *cleanup = new_qdr_delivery_cleanup_t();
+        if (delivery->msg && qd_message_allocated_on_core(delivery->msg)) {
+            qdr_delivery_cleanup_t *cleanup = qdr_delivery_cleanup_array_add(&core->local_delivery_cleanup_array);
+            cleanup->msg = delivery->msg;
+            cleanup->iter = delivery->to_addr;
+        } else {
+            qdr_delivery_cleanup_t *cleanup = new_qdr_delivery_cleanup_t();
 
-        DEQ_ITEM_INIT(cleanup);
-        cleanup->msg  = delivery->msg;
-        cleanup->iter = delivery->to_addr;
+            DEQ_ITEM_INIT(cleanup);
+            cleanup->msg = delivery->msg;
+            cleanup->iter = delivery->to_addr;
 
-        DEQ_INSERT_TAIL(core->delivery_cleanup_list, cleanup);
+            DEQ_INSERT_TAIL(core->delivery_cleanup_list, cleanup);
+        }
     }
 
     if (delivery->tracking_addr) {

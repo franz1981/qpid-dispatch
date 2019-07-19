@@ -264,7 +264,7 @@ void qdr_send_to1(qdr_core_t *core, qd_message_t *msg, qd_iterator_t *addr, bool
 {
     qdr_action_t *action = qdr_action(qdr_send_to_CT, "send_to");
     action->args.io.address           = qdr_field_from_iter(addr);
-    action->args.io.message           = qd_message_copy(msg);
+    action->args.io.message           = qd_message_copy(msg, false);
     action->args.io.exclude_inprocess = exclude_inprocess;
     action->args.io.control           = control;
 
@@ -276,7 +276,7 @@ void qdr_send_to2(qdr_core_t *core, qd_message_t *msg, const char *addr, bool ex
 {
     qdr_action_t *action = qdr_action(qdr_send_to_CT, "send_to");
     action->args.io.address           = qdr_field(addr);
-    action->args.io.message           = qd_message_copy(msg);
+    action->args.io.message           = qd_message_copy(msg, false);
     action->args.io.exclude_inprocess = exclude_inprocess;
     action->args.io.control           = control;
 

@@ -130,7 +130,7 @@ void qd_message_free(qd_message_t *msg);
  * @param msg A pointer to a qd_message_t referencing a message.
  * @return A new pointer to the same referenced message.
  */
-qd_message_t *qd_message_copy(qd_message_t *msg);
+qd_message_t *qd_message_copy(qd_message_t *msg, bool on_core);
 
 /**
  * Retrieve the message annotations from a message and place them in message storage.
@@ -199,6 +199,11 @@ int  qd_message_get_phase_annotation(const qd_message_t *msg);
  *
  */
 void qd_message_set_ingress_annotation(qd_message_t *msg, qd_composed_field_t *ingress_field);
+
+/**
+ * @return {@code true} if the {@code msg} has been allocated on core thread, {@code false} otherwise
+ */
+bool qd_message_allocated_on_core(qd_message_t *msg);
 
 /**
  * Receive message data frame by frame via a delivery.  This function may be called more than once on the same

@@ -144,11 +144,16 @@ unsigned int qd_buffer_list_clone(qd_buffer_list_t *dst, const qd_buffer_list_t 
 
 void qd_buffer_list_free_buffers(qd_buffer_list_t *list)
 {
-    qd_buffer_t *buf = DEQ_HEAD(*list);
-    while (buf) {
-        DEQ_REMOVE_HEAD(*list);
-        qd_buffer_free(buf);
-        buf = DEQ_HEAD(*list);
+    const size_t count = DEQ_SIZE(*list);
+    if (count > 0) {
+        qd_buffer_t *buffer = DEQ_HEAD(*list);
+        for (int i = 0; i < count; i++) {
+            assert(buffer != NULL);
+            qd_buffer_t *next = (i < (count - 1)) ? DEQ_NEXT(buffer) : NULL;
+            qd_buffer_free(buffer);
+            buffer = next;
+        }
+        DEQ_INIT(*list);
     }
 }
 

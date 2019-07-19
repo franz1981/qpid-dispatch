@@ -53,6 +53,30 @@ uint64_t next_power_of_two(uint64_t v)
     return v;
 }
 
+inline void qdr_delivery_cleanup_array_init(qdr_delivery_cleanup_array_t *cleanup, uint64_t capacity)
+{
+    capacity = next_power_of_two(capacity);
+    cleanup->count = 0;
+    cleanup->capacity = capacity;
+    ALLOC_CACHE_ALIGNED(capacity * sizeof(qdr_delivery_cleanup_t), cleanup->buffer);
+}
+
+inline qdr_delivery_cleanup_t *qdr_delivery_cleanup_array_add(qdr_delivery_cleanup_array_t *cleanup)
+{
+    if (cleanup->count == cleanup->capacity) {
+        //increase capacity
+        uint64_t old_capacity = cleanup->capacity;
+        qdr_delivery_cleanup_t *old_buffer = cleanup->buffer;
+        cleanup->capacity = old_capacity * 2;
+        //can't use memmove due to wrapping, will use (at worst) 2 memcpy
+        ALLOC_CACHE_ALIGNED(cleanup->capacity * sizeof(qdr_delivery_cleanup_t), cleanup->buffer);
+        memcpy(cleanup->buffer, old_buffer, cleanup->count);
+        free(old_buffer);
+    }
+    cleanup->count++;
+    return cleanup->buffer + (cleanup->count - 1);
+}
+
 inline void qdr_action_q_init(qdr_action_q_t *actions, uint64_t capacity)
 {
     capacity = next_power_of_two(capacity);
@@ -152,6 +176,7 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     core->action_lock = sys_mutex();
     core->running     = true;
     qdr_action_q_init(&core->action_list, 1024);
+    qdr_delivery_cleanup_array_init(&core->local_delivery_cleanup_array, 128);
 
     core->work_lock = sys_mutex();
     DEQ_INIT(core->work_list);
@@ -302,7 +327,7 @@ void qdr_core_free(qdr_core_t *core)
     if (core->neighbor_free_mask)        qd_bitmask_free(core->neighbor_free_mask);
 
     free(core->action_list.action);
-
+    free(core->local_delivery_cleanup_array.buffer);
     free(core);
 }
 

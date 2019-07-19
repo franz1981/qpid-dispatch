@@ -106,7 +106,7 @@ static qd_management_context_t* qd_management_context(qd_message_t              
     ctx->count  = count;
     ctx->field  = field;
     ctx->msg    = msg;
-    ctx->source = qd_message_copy(source);
+    ctx->source = qd_message_copy(source, false);
     ctx->query  = query;
     ctx->current_count = 0;
     ctx->core   = core;

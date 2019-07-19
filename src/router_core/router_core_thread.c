@@ -119,6 +119,20 @@ void qdr_modules_finalize(qdr_core_t *core)
 
 }
 
+static inline void cleanup_local_deliveries(qdr_delivery_cleanup_array_t *deliveries)
+{
+    for (int i = 0; i < deliveries->count; i++) {
+        qdr_delivery_cleanup_t *cleanup = deliveries->buffer + i;
+        if (cleanup->msg) {
+            assert(qd_message_allocated_on_core(cleanup->msg));
+            qd_message_free(cleanup->msg);
+        }
+        if (cleanup->iter) {
+            qd_iterator_free(cleanup->iter);
+        }
+    }
+    deliveries->count = 0;
+}
 
 void *router_core_thread(void *arg)
 {
@@ -179,6 +193,9 @@ void *router_core_thread(void *arg)
             qdr_general_work_t *work = qdr_general_work(qdr_do_message_to_addr_free);
             DEQ_MOVE(core->delivery_cleanup_list, work->delivery_cleanup_list);
             qdr_post_general_work_CT(core, work);
+        }
+        if (core->local_delivery_cleanup_array.count > 0) {
+            cleanup_local_deliveries(&core->local_delivery_cleanup_array);
         }
     }
 

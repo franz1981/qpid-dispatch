@@ -314,7 +314,7 @@ static int send_message(qdr_core_t     *core,
                         bool            control)
 {
     int count = 0;
-    qd_message_t *copy = qd_message_copy(msg);
+    qd_message_t *copy = qd_message_copy(msg, true);
 
     qd_log(core->log, QD_LOG_TRACE, "Exchange '%s' forwarding message to '%s'",
            next_hop->exchange->name, next_hop->next_hop);
