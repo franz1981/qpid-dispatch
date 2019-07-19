@@ -197,7 +197,7 @@ struct qd_alloc_pool_t {
 };
 
 qd_alloc_config_t qd_alloc_default_config_big   = {16,  32, 0};
-qd_alloc_config_t qd_alloc_default_config_small = {64, 128, 0};
+qd_alloc_config_t qd_alloc_default_config_small = {128, 1024, 0};
 #define BIG_THRESHOLD 2000
 
 static sys_mutex_t          *init_lock = 0;
