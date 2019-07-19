@@ -896,7 +896,7 @@ qd_message_t *qd_message()
     msg->send_complete = false;
     msg->tag_sent      = false;
     msg->is_fanout     = false;
-
+    msg->on_core       = false;
     msg->content = new_qd_message_content_t();
 
     if (msg->content == 0) {
@@ -984,8 +984,7 @@ void qd_message_free(qd_message_t *in_msg)
     free_qd_message_t((qd_message_t*) msg);
 }
 
-
-qd_message_t *qd_message_copy(qd_message_t *in_msg)
+qd_message_t *qd_message_copy(qd_message_t *in_msg, bool on_core)
 {
     qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
     qd_message_content_t *content = msg->content;
@@ -1008,6 +1007,7 @@ qd_message_t *qd_message_copy(qd_message_t *in_msg)
     copy->send_complete = false;
     copy->tag_sent      = false;
     copy->is_fanout     = false;
+    copy->on_core       = on_core;
 
     qd_message_message_annotations((qd_message_t*) copy);
 
@@ -1246,6 +1246,18 @@ qd_message_t * qd_get_message_context(pn_delivery_t *delivery)
     return 0;
 }
 
+void qd_message_clean_buffer_lists(qd_message_t *msg)
+{
+    qd_message_pvt_t *pvt = (qd_message_pvt_t *) msg;
+    qd_buffer_list_free_buffers(&pvt->ma_trace);
+    qd_buffer_list_free_buffers(&pvt->ma_to_override);
+    qd_buffer_list_free_buffers(&pvt->ma_ingress);
+}
+
+bool qd_message_allocated_on_core(qd_message_t *msg)
+{
+    return ((qd_message_pvt_t *) msg)->on_core;
+}
 
 qd_message_t *qd_message_receive(pn_delivery_t *delivery)
 {

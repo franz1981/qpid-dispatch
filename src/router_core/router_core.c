@@ -152,7 +152,6 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     core->action_lock = sys_mutex();
     core->running     = true;
     qdr_action_q_init(&core->action_list, 1024);
-
     core->work_lock = sys_mutex();
     DEQ_INIT(core->work_list);
     core->work_timer = qd_timer(core->qd, qdr_general_handler, core);
@@ -302,7 +301,6 @@ void qdr_core_free(qdr_core_t *core)
     if (core->neighbor_free_mask)        qd_bitmask_free(core->neighbor_free_mask);
 
     free(core->action_list.action);
-
     free(core);
 }
 

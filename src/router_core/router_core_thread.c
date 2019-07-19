@@ -119,7 +119,6 @@ void qdr_modules_finalize(qdr_core_t *core)
 
 }
 
-
 void *router_core_thread(void *arg)
 {
     size_t             action_list_limit = 1024;

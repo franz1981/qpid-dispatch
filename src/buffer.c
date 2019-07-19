@@ -106,7 +106,6 @@ uint32_t qd_buffer_dec_fanout(qd_buffer_t *buf)
     return sys_atomic_dec(&buf->bfanout);
 }
 
-
 unsigned char *qd_buffer_at(qd_buffer_t *buf, size_t len)
 {
     // If the len is greater than the buffer size, we might point to some garbage.
@@ -144,11 +143,16 @@ unsigned int qd_buffer_list_clone(qd_buffer_list_t *dst, const qd_buffer_list_t 
 
 void qd_buffer_list_free_buffers(qd_buffer_list_t *list)
 {
-    qd_buffer_t *buf = DEQ_HEAD(*list);
-    while (buf) {
-        DEQ_REMOVE_HEAD(*list);
-        qd_buffer_free(buf);
-        buf = DEQ_HEAD(*list);
+    const size_t count = DEQ_SIZE(*list);
+    if (count > 0) {
+        qd_buffer_t *buffer = DEQ_HEAD(*list);
+        for (int i = 0; i < count; i++) {
+            assert(buffer != NULL);
+            qd_buffer_t *next = (i < (count - 1)) ? DEQ_NEXT(buffer) : NULL;
+            qd_buffer_free(buffer);
+            buffer = next;
+        }
+        DEQ_INIT(*list);
     }
 }
 

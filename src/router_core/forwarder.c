@@ -119,7 +119,7 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
 
     ZERO(out_dlv);
     set_safe_ptr_qdr_link_t(link, &out_dlv->link_sp);
-    out_dlv->msg        = qd_message_copy(msg);
+    out_dlv->msg        = qd_message_copy(msg, true);
     out_dlv->settled    = !in_dlv || in_dlv->settled;
     out_dlv->presettled = out_dlv->settled;
     *tag                = core->next_tag++;
@@ -270,7 +270,7 @@ void qdr_forward_on_message_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_li
     qdr_general_work_t *work = qdr_general_work(qdr_forward_on_message);
     work->on_message         = sub->on_message;
     work->on_message_context = sub->on_message_context;
-    work->msg                = qd_message_copy(msg);
+    work->msg                = qd_message_copy(msg, true);
     work->maskbit            = link ? link->conn->mask_bit : 0;
     work->inter_router_cost  = link ? link->conn->inter_router_cost : 1;
     work->in_conn_id         = link ? link->conn->identity : 0;

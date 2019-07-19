@@ -383,10 +383,13 @@ static void qdr_delete_delivery_internal_CT(qdr_core_t *core, qdr_delivery_t *de
     assert(sys_atomic_get(&delivery->ref_count) == 0);
 
     if (delivery->msg || delivery->to_addr) {
+        if (delivery->msg && qd_message_allocated_on_core(delivery->msg)) {
+            qd_message_clean_buffer_lists(delivery->msg);
+        }
         qdr_delivery_cleanup_t *cleanup = new_qdr_delivery_cleanup_t();
 
         DEQ_ITEM_INIT(cleanup);
-        cleanup->msg  = delivery->msg;
+        cleanup->msg = delivery->msg;
         cleanup->iter = delivery->to_addr;
 
         DEQ_INSERT_TAIL(core->delivery_cleanup_list, cleanup);

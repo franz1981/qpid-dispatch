@@ -136,6 +136,7 @@ typedef struct {
     bool                  send_complete;   // Has the message been completely received and completely sent?
     bool                  tag_sent;        // Tags are sent
     bool                  is_fanout;       // If msg is an outgoing fanout
+    bool                  on_core;         // if msg has been allocated on core
 } qd_message_pvt_t;
 
 ALLOC_DECLARE(qd_message_t);
