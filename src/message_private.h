@@ -128,6 +128,7 @@ typedef struct {
     qd_message_depth_t    message_depth;   // What is the depth of the message that has been received so far
     qd_message_depth_t    sent_depth;      // How much of the message has been sent?  QD_DEPTH_NONE means nothing has been sent so far, QD_DEPTH_HEADER means the header has already been sent, dont send it again and so on.
     qd_message_content_t *content;         // The actual content of the message. The content is never copied
+    qd_buffer_t          *ma_buffer;       // If !NULL, ma_to_ovverride/ma_trace_ma_ingress are using slices of it
     qd_buffer_list_t      ma_to_override;  // to field in outgoing message annotations.
     qd_buffer_list_t      ma_trace;        // trace list in outgoing message annotations
     qd_buffer_list_t      ma_ingress;      // ingress field in outgoing message annotations

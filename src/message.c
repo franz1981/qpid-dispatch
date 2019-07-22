@@ -889,6 +889,7 @@ qd_message_t *qd_message()
     msg->cursor.buffer = 0;
     msg->cursor.cursor = 0;
     msg->sent_depth    = QD_DEPTH_NONE;
+    msg->ma_buffer     = NULL;
     DEQ_INIT(msg->ma_to_override);
     DEQ_INIT(msg->ma_trace);
     DEQ_INIT(msg->ma_ingress);
@@ -908,7 +909,6 @@ qd_message_t *qd_message()
     msg->content->lock = sys_mutex();
     sys_atomic_init(&msg->content->ref_count, 1);
     msg->content->parse_depth = QD_DEPTH_NONE;
-
     return (qd_message_t*) msg;
 }
 
@@ -918,10 +918,20 @@ void qd_message_free(qd_message_t *in_msg)
     if (!in_msg) return;
     uint32_t rc;
     qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
-
-    qd_buffer_list_free_buffers(&msg->ma_to_override);
-    qd_buffer_list_free_buffers(&msg->ma_trace);
-    qd_buffer_list_free_buffers(&msg->ma_ingress);
+    if (msg->ma_buffer == NULL) {
+        qd_buffer_list_free_buffers(&msg->ma_to_override);
+        qd_buffer_list_free_buffers(&msg->ma_trace);
+        qd_buffer_list_free_buffers(&msg->ma_ingress);
+    } else {
+        assert(DEQ_SIZE(msg->ma_to_override) <= 1);
+        assert(DEQ_SIZE(msg->ma_trace) <= 1);
+        assert(DEQ_SIZE(msg->ma_ingress) <= 1);
+        qd_buffer_free(msg->ma_buffer);
+        msg->ma_buffer = NULL;
+        DEQ_INIT(msg->ma_to_override);
+        DEQ_INIT(msg->ma_trace);
+        DEQ_INIT(msg->ma_ingress);
+    }
 
     qd_message_content_t *content = msg->content;
 
@@ -984,6 +994,64 @@ void qd_message_free(qd_message_t *in_msg)
     free_qd_message_t((qd_message_t*) msg);
 }
 
+static inline void singleton_copy_buffer_list(qd_buffer_list_t *from, qd_buffer_list_t *to, uint8_t *memory)
+{
+    DEQ_INIT(*to);
+    qd_buffer_t *buffer = DEQ_HEAD(*from);
+    assert(DEQ_SIZE(*from) <= 1);
+    if (buffer != NULL) {
+        qd_buffer_t *copy = (qd_buffer_t *) memory;
+        DEQ_ITEM_INIT(copy);
+        copy->size = qd_buffer_size(buffer);
+        sys_atomic_init(&copy->bfanout, 0);
+        memcpy(qd_buffer_base(buffer), qd_buffer_base(copy), copy->size);
+        DEQ_INSERT_TAIL(*to, copy);
+    }
+}
+
+static inline size_t size_of_singleton_buffer_list(qd_buffer_list_t *buffer_list)
+{
+    assert(DEQ_SIZE(*buffer_list) <= 1);
+    qd_buffer_t *buffer = DEQ_HEAD(*buffer_list);
+    if (buffer == NULL) {
+        return 0;
+    }
+    return sizeof(qd_buffer_t *) + buffer->size;
+}
+
+static bool qd_message_copy_singleton_buffer_lists(qd_message_pvt_t *msg, qd_message_pvt_t *copy)
+{
+    assert(DEQ_SIZE(msg->ma_to_override) <= 1);
+    assert(DEQ_SIZE(msg->ma_trace) <= 1);
+    assert(DEQ_SIZE(msg->ma_ingress) <= 1);
+    size_t total_size_ma_to_override = size_of_singleton_buffer_list(&msg->ma_to_override);
+    total_size_ma_to_override = POW2_ALIGN(total_size_ma_to_override, sizeof(qd_buffer_t *));
+
+    size_t total_size_ma_trace = size_of_singleton_buffer_list(&msg->ma_trace);
+    total_size_ma_trace = POW2_ALIGN(total_size_ma_trace, sizeof(qd_buffer_t *));
+
+    size_t total_size_ma_ingress = size_of_singleton_buffer_list(&msg->ma_ingress);
+    total_size_ma_ingress = POW2_ALIGN(total_size_ma_ingress, sizeof(qd_buffer_t *));
+
+    const size_t total_size = total_size_ma_to_override + total_size_ma_trace + total_size_ma_ingress;
+    const size_t available_capacity = sizeof(qd_buffer_t *) + BUFFER_SIZE;
+    if (total_size <= available_capacity) {
+        copy->ma_buffer = qd_buffer();
+        uint8_t *const restrict memory = (uint8_t *) copy->ma_buffer;
+        if (total_size_ma_to_override > 0) {
+            singleton_copy_buffer_list(&msg->ma_to_override, &copy->ma_to_override, memory);
+        }
+        if (total_size_ma_trace > 0) {
+            singleton_copy_buffer_list(&msg->ma_trace, &copy->ma_trace, memory + total_size_ma_to_override);
+        }
+        if (total_size_ma_ingress > 0) {
+            singleton_copy_buffer_list(&msg->ma_ingress, &copy->ma_ingress,
+                                       memory + total_size_ma_to_override + total_size_ma_trace);
+        }
+        return true;
+    }
+    return false;
+}
 
 qd_message_t *qd_message_copy(qd_message_t *in_msg)
 {
@@ -993,10 +1061,19 @@ qd_message_t *qd_message_copy(qd_message_t *in_msg)
 
     if (!copy)
         return 0;
-
-    qd_buffer_list_clone(&copy->ma_to_override, &msg->ma_to_override);
-    qd_buffer_list_clone(&copy->ma_trace, &msg->ma_trace);
-    qd_buffer_list_clone(&copy->ma_ingress, &msg->ma_ingress);
+    //fast path clone?
+    copy->ma_buffer = NULL;
+    if (DEQ_SIZE(msg->ma_to_override) <= 1 && DEQ_SIZE(msg->ma_trace) <= 1 && DEQ_SIZE(msg->ma_ingress) <= 1) {
+        if (!qd_message_copy_singleton_buffer_lists(msg, copy)) {
+            qd_buffer_list_clone(&copy->ma_to_override, &msg->ma_to_override);
+            qd_buffer_list_clone(&copy->ma_trace, &msg->ma_trace);
+            qd_buffer_list_clone(&copy->ma_ingress, &msg->ma_ingress);
+        }
+    } else {
+        qd_buffer_list_clone(&copy->ma_to_override, &msg->ma_to_override);
+        qd_buffer_list_clone(&copy->ma_trace, &msg->ma_trace);
+        qd_buffer_list_clone(&copy->ma_ingress, &msg->ma_ingress);
+    }
     copy->ma_phase = msg->ma_phase;
     copy->strip_annotations_in  = msg->strip_annotations_in;
 
@@ -1062,6 +1139,13 @@ void qd_message_message_annotations(qd_message_t *in_msg)
 void qd_message_set_trace_annotation(qd_message_t *in_msg, qd_composed_field_t *trace_field)
 {
     qd_message_pvt_t *msg = (qd_message_pvt_t*) in_msg;
+    if (msg->ma_buffer != NULL) {
+        if ((DEQ_SIZE(msg->ma_ingress) + DEQ_SIZE(msg->ma_to_override)) == 0) {
+            qd_buffer_free(msg->ma_buffer);
+            msg->ma_buffer = NULL;
+            DEQ_INIT(msg->ma_trace);
+        }
+    }
     qd_buffer_list_free_buffers(&msg->ma_trace);
     qd_compose_take_buffers(trace_field, &msg->ma_trace);
     qd_compose_free(trace_field);
@@ -1070,6 +1154,13 @@ void qd_message_set_trace_annotation(qd_message_t *in_msg, qd_composed_field_t *
 void qd_message_set_to_override_annotation(qd_message_t *in_msg, qd_composed_field_t *to_field)
 {
     qd_message_pvt_t *msg = (qd_message_pvt_t*) in_msg;
+    if (msg->ma_buffer != NULL) {
+        if ((DEQ_SIZE(msg->ma_trace) + DEQ_SIZE(msg->ma_ingress)) == 0) {
+            qd_buffer_free(msg->ma_buffer);
+            msg->ma_buffer = NULL;
+            DEQ_INIT(msg->ma_to_override);
+        }
+    }
     qd_buffer_list_free_buffers(&msg->ma_to_override);
     qd_compose_take_buffers(to_field, &msg->ma_to_override);
     qd_compose_free(to_field);
@@ -1090,6 +1181,13 @@ int qd_message_get_phase_annotation(const qd_message_t *in_msg)
 void qd_message_set_ingress_annotation(qd_message_t *in_msg, qd_composed_field_t *ingress_field)
 {
     qd_message_pvt_t *msg = (qd_message_pvt_t*) in_msg;
+    if (msg->ma_buffer != NULL) {
+        if ((DEQ_SIZE(msg->ma_trace) + DEQ_SIZE(msg->ma_to_override)) == 0) {
+            qd_buffer_free(msg->ma_buffer);
+            msg->ma_buffer = NULL;
+            DEQ_INIT(msg->ma_ingress);
+        }
+    }
     qd_buffer_list_free_buffers(&msg->ma_ingress);
     qd_compose_take_buffers(ingress_field, &msg->ma_ingress);
     qd_compose_free(ingress_field);

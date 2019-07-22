@@ -35,6 +35,8 @@ DEQ_DECLARE(qd_buffer_t, qd_buffer_list_t);
 
 extern size_t BUFFER_SIZE;
 
+#define POW2_ALIGN(value,alignment) (((value) + ((alignment) - 1)) & ~((alignment) - 1))
+
 /** A raw byte buffer .*/
 struct qd_buffer_t {
     DEQ_LINKS(qd_buffer_t);
