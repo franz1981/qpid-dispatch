@@ -754,6 +754,7 @@ struct qdr_core_t {
     qd_log_source_t   *agent_log;
     sys_thread_t      *thread;
     bool               running;
+    bool               sleeping;
     qdr_action_list_t  action_list;
     sys_cond_t        *action_cond;
     sys_mutex_t       *action_lock;
